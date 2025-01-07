@@ -78,7 +78,7 @@ class Downsample(layers.Layer):
         self.with_conv = with_conv
         self.channels = channels
         self.conv = layers.Conv2D(self.channels, (3, 3), padding="same", strides=2)
-        self.avg_pool = layers.AveragePooling2D(strides=2, padding="same")
+        self.avg_pool = layers.AveragePooling2D(pool_size = (2, 2), strides=2, padding="same")
 
     def call(self, inputs):
 
