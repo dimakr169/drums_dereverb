@@ -13,7 +13,7 @@ class Config:
 
     def __init__(self):
         # audio config
-        self.inp_type = "wav"  # 'wav' or 'flac'
+        self.inp_type = "flac"  # 'wav' or 'flac'
         self.sr = 44100  # sample rate
         self.dur = 2  # duration in seconds
         self.lufs = -28.0  # for audio normalizing
@@ -33,7 +33,7 @@ class Config:
         self.min_distance_to_wall = 1.0  # for mic and source positions
 
         # Augmentations
-        self.aug_factor = 3 # apply augmentations for each slice
+        self.aug_factor = 1 # apply augmentations for each slice
 
         # stft
         self.hop = (

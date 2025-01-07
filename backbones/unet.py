@@ -1,5 +1,4 @@
 import math
-
 import tensorflow as tf
 from tensorflow.keras import layers, models
 
@@ -100,13 +99,13 @@ def kernel_init(scale):
     )
 
 
-# not used so far
+@tf.keras.utils.register_keras_serializable()
 class AttentionBlock(layers.Layer):
     """Applies self-attention.
 
     Args:
-        units: Number of units in the dense layers
-        groups: Number of groups to be used for GroupNormalization layer
+        units: Number of units in the dense layers.
+        groups: Number of groups to be used for GroupNormalization layer (not used).
     """
 
     def __init__(self, channels, groups=8, **kwargs):
@@ -126,22 +125,32 @@ class AttentionBlock(layers.Layer):
         width = tf.shape(inputs)[2]
         scale = tf.cast(self.channels, tf.float32) ** (-0.5)
 
-        # inputs = self.norm(inputs)
-        q = self.query(inputs)
-        k = self.key(inputs)
-        v = self.value(inputs)
+        # Compute query, key, and value
+        q = self.query(inputs)  # Shape: [B, H, W, C]
+        k = self.key(inputs)    # Shape: [B, H, W, C]
+        v = self.value(inputs)  # Shape: [B, H, W, C]
 
-        attn_score = tf.einsum("bhwc, bHWc->bhwHW", q, k) * scale
-        attn_score = tf.reshape(attn_score, [batch_size, height, width, height * width])
+        # Reshape to [B, H*W, C]
+        q = tf.reshape(q, [batch_size, height * width, self.channels])
+        k = tf.reshape(k, [batch_size, height * width, self.channels])
+        v = tf.reshape(v, [batch_size, height * width, self.channels])        
 
-        attn_score = tf.nn.softmax(attn_score, -1)
-        attn_score = tf.reshape(attn_score, [batch_size, height, width, height, width])
+        # Compute attention scores
+        attn_scores = tf.matmul(q, k, transpose_b=True) * scale  # [B, H*W, H*W]
+        attn_probs = tf.nn.softmax(attn_scores, axis=-1)  # Normalize scores
 
-        proj = tf.einsum("bhwHW,bHWc->bhwc", attn_score, v)
-        proj = self.proj(proj)
-        return inputs + proj
+        # Compute attention output
+        attn_output = tf.matmul(attn_probs, v)  # [B, H*W, C]
+        attn_output = tf.reshape(attn_output, [batch_size, height, width, self.channels])
+
+        # Project back to original dimensions
+        proj_output = self.proj(attn_output)
+
+        # Add residual connection
+        return inputs + proj_output
 
 
+@tf.keras.utils.register_keras_serializable()
 class ResNetBlock(layers.Layer):
     def __init__(
         self, in_ch, out_ch=None, conv_shortcut=False, use_bn=False, dropout=0.0
@@ -215,21 +224,17 @@ class UNet(models.Model):
         super(UNet, self).__init__()
         self.config = config
         self.num_res_blocks = self.config.num_res_blocks
-        self.attn_resolutions = self.config.attn_resolutions
+        self.use_attention = self.config.use_attention
         self.channels = self.config.channels
         self.ch_mult = self.config.ch_mult
         self.dropout = self.config.dropout
         self.resample_with_conv = self.config.resample_with_conv
         self.num_resolutions = len(self.ch_mult)
-        self.create_mask = (
-            self.config.create_mask
-        )  # creating a mask or being generative
-        self.continuous_emb = self.config.continuous_emb
-        self.ri_inp = (
-            self.config.ri_inp
-        )  # if input is Magnitude only (1) or Real/Imaginary (2)
+        self.create_mask = self.config.create_mask # whether creates mask or not
+        self.continuous_emb = self.config.continuous_emb 
+        self.ri_inp = self.config.ri_inp # Real/Imaginary or Magnitude
         self.use_bn = self.config.use_bn  # if BN layers to be used on Residual blocks
-        self.has_attention = any(self.attn_resolutions)
+
 
         self.in_embed = [
             TimestepEmbedding(self.channels * 2, self.continuous_emb),
@@ -238,13 +243,13 @@ class UNet(models.Model):
             layers.Dense(self.channels * 4),
         ]
 
-        # Downsampling.
+
+        # Downsampling
         self.pre_process = layers.Conv2D(self.channels, (3, 3), padding="same")
         self.downsampling = []
         channel_track = self.channels
-        for i_level in range(len(self.ch_mult)):
+        for i_level in range(self.num_resolutions):
             downsampling_block = []
-            # Residual blocks for this resolution.
             for _ in range(self.num_res_blocks):
                 downsampling_block.append(
                     ResNetBlock(
@@ -254,8 +259,7 @@ class UNet(models.Model):
                         dropout=self.dropout,
                     )
                 )
-                # add attention
-                if self.attn_resolutions[i_level]:
+                if self.use_attention:
                     downsampling_block.append(
                         AttentionBlock(channels=self.channels * self.ch_mult[i_level])
                     )
@@ -269,26 +273,19 @@ class UNet(models.Model):
             channel_track = self.channels * self.ch_mult[i_level]
             self.downsampling.append(downsampling_block)
 
-        # Middle.
-        if self.has_attention:
-            self.middle = [
+
+        # Middle
+        self.middle = [
                 ResNetBlock(
                     in_ch=channel_track, use_bn=self.use_bn, dropout=self.dropout
-                ),
-                AttentionBlock(channels=channel_track),
-                ResNetBlock(
+                )
+        ]
+        if self.use_attention:
+            self.middle.append(AttentionBlock(channels=channel_track))
+        self.middle.append(ResNetBlock(
                     in_ch=channel_track, use_bn=self.use_bn, dropout=self.dropout
-                ),
-            ]
-        else:
-            self.middle = [
-                ResNetBlock(
-                    in_ch=channel_track, use_bn=self.use_bn, dropout=self.dropout
-                ),
-                ResNetBlock(
-                    in_ch=channel_track, use_bn=self.use_bn, dropout=self.dropout
-                ),
-            ]
+                ))
+
 
         # Upsampling.
         self.upsampling = []
@@ -305,8 +302,8 @@ class UNet(models.Model):
                         dropout=self.dropout,
                     )
                 )
-                # add attention
-                if self.attn_resolutions[i_level]:
+                # Add attention if enabled.
+                if self.use_attention:
                     upsampling_block.append(
                         AttentionBlock(channels=self.channels * self.ch_mult[i_level])
                     )
@@ -336,48 +333,51 @@ class UNet(models.Model):
         x = inp[0]
         temb = inp[1]
 
+        # Process timestep embedding through embedding layers.
         for lay in self.in_embed:
             temb = lay(temb)
-        # Downsampling.
+        
+        # Downsampling
         hs = [self.pre_process(x)]
         for i in range(len(self.downsampling)):
             block = self.downsampling[i]
-            if self.attn_resolutions[i]:
-                total_res_blocks = self.num_res_blocks * 2  # with attention
+            if self.use_attention:  # Attention applied at all levels
+                total_res_blocks = self.num_res_blocks * 2
                 for idx_block in range(0, total_res_blocks, 2):
-                    h = block[idx_block](hs[-1], temb)
-                    h = block[idx_block + 1](h)
+                    h = block[idx_block](hs[-1], temb)  # ResNetBlock
+                    h = block[idx_block + 1](h)  # AttentionBlock
                     hs.append(h)
-            else:
+            else:  # No attention
                 total_res_blocks = self.num_res_blocks
                 for idx_block in range(total_res_blocks):
-                    h = block[idx_block](hs[-1], temb)
+                    h = block[idx_block](hs[-1], temb)  # ResNetBlock only
                     hs.append(h)
+            # Additional downsampling layers, if any (e.g., Downsample)
             if len(block) > total_res_blocks:
                 for extra_lay in block[total_res_blocks:]:
                     hs.append(extra_lay(hs[-1]))
 
-        # Middle.
+        # Middle
         h = hs[-1]
-        for n, lay in enumerate(self.middle):
-            if self.has_attention and not (n % 2) == 0:
+        for lay in self.middle:
+            if isinstance(lay, AttentionBlock):  # Handle AttentionBlock separately
                 h = lay(h)
-            else:
+            else:  # ResNetBlock
                 h = lay(h, temb)
 
-        # Upsampling.
+        # Upsampling
         for i in range(len(self.upsampling)):
             block = self.upsampling[i]
-            if self.attn_resolutions[self.num_resolutions - 1 - i]:
+            if self.use_attention:  # Attention applied at all levels
                 total_res_blocks = self.num_res_blocks * 2 + 1
                 for idx_block in range(0, total_res_blocks, 2):
-                    h = block[idx_block](tf.concat([h, hs.pop()], axis=-1), temb)
-                    h = block[idx_block + 1](h)
-            else:
+                    h = block[idx_block](tf.concat([h, hs.pop()], axis=-1), temb)  # ResNetBlock
+                    h = block[idx_block + 1](h)  # AttentionBlock
+            else:  # No attention
                 total_res_blocks = self.num_res_blocks + 1
                 for idx_block in range(total_res_blocks):
-                    h = block[idx_block](tf.concat([h, hs.pop()], axis=-1), temb)
-            # Upsample.
+                    h = block[idx_block](tf.concat([h, hs.pop()], axis=-1), temb)  # ResNetBlock only
+            # Upsampling layers, if any (e.g., Upsample)
             if len(block) > total_res_blocks:
                 for extra_lay in block[total_res_blocks:]:
                     h = extra_lay(h)
@@ -386,7 +386,7 @@ class UNet(models.Model):
         for lay in self.end:
             h = lay(h)
 
-        if self.create_mask:  # whather creates mask or not
+        if self.create_mask: 
 
             h = tf.keras.activations.sigmoid(h)
             return tf.multiply(x, h)
