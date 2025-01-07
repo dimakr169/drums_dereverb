@@ -16,7 +16,7 @@ class TrainConfig:
     def __init__(self):
         # optimizer
         self.lr_policy = "fixed"
-        self.learning_rate = 1e-4
+        self.learning_rate = 1e-5
         # self.lr_policy = 'noam'
         # self.learning_rate = 1
         # self.lr_params = {
