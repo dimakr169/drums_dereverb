@@ -13,8 +13,8 @@ class Config:
 
         """UNet (Cold Diffusion)"""
         self.num_res_blocks = 2  # Default: 2
-        self.use_attention = True  # Apply attention globally (True or False)
-        self.channels = 16  # Default: 16
+        self.use_attention = False  # Apply attention globally (True or False)
+        self.channels = 24  # Default: 16
         self.ch_mult = (1, 2, 4, 8)  # Default: (1, 2, 4, 8, 16, 32, 64)
         self.dropout = 0.1  # Default: 0.2
         self.ri_inp = True  # if input is Real/Imaginary (True) or Magnintude (False)

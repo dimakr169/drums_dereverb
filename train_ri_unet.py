@@ -416,8 +416,8 @@ class ColdRIUNetTrainer:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--data-dir", default='data/out')
-    parser.add_argument("--model-name", default="CDiff_RI_test2")
+    parser.add_argument("--data-dir", default='data/out_combined_33k')
+    parser.add_argument("--model-name", default="CDiff_RI_drums_33k")
     parser.add_argument("--gpu", default=0)  # set GPU
     args = parser.parse_args()
 
