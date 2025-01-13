@@ -310,16 +310,16 @@ class ColdRIUNetTrainer:
             start_time = time.time()
 
             # reset metrics
-            self.noise_loss_train.reset_state()
-            self.noise_loss_val.reset_state()
-            self.nmi_loss_train.reset_state()
-            self.nmi_loss_val.reset_state()
-            self.audio_loss_train.reset_state()
-            self.audio_loss_val.reset_state()
+            self.noise_loss_train.reset_states()
+            self.noise_loss_val.reset_states()
+            self.nmi_loss_train.reset_states()
+            self.nmi_loss_val.reset_states()
+            self.audio_loss_train.reset_states()
+            self.audio_loss_val.reset_states()
 
-            self.sisdr.reset_state()
-            self.sisir.reset_state()
-            self.sisar.reset_state()
+            self.sisdr.reset_states()
+            self.sisir.reset_states()
+            self.sisar.reset_states()
 
             # Training Loop
             with tqdm.tqdm(total=train_size, desc="Training") as pbar:
@@ -423,8 +423,8 @@ class ColdRIUNetTrainer:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--data-dir", default='out_combined_33k')
-    parser.add_argument("--model-name", default="CDiff_RI_drums_33k")
+    parser.add_argument("--data-dir", default='data/out_gmd')
+    parser.add_argument("--model-name", default="CDiff_RI_gmd_pre_5e-5")
     parser.add_argument("--gpu", default=0)  # set GPU
     args = parser.parse_args()
 
@@ -453,8 +453,11 @@ if __name__ == "__main__":
     # Initialize RI UNet
     ri_unet = UNet(model_params)
 
+    # Freeze Encoder
+    # ri_unet.freeze_encoder()
+
     # Load pretrained weights
-    pretrained_ckpt='pretrained_models/Diff_UNet_RI'
+    pretrained_ckpt='pretrained_models/DIff_UNet_RI/ckpt-18'
 
     # Initialize Trainer
     trainer = ColdRIUNetTrainer(ri_unet, pre_params, train_params, ad2_data, output_dir, pretrained_ckpt)

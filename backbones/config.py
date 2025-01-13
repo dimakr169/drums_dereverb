@@ -18,7 +18,7 @@ class Config:
         self.ch_mult = (1, 2, 4, 8)  # Default: (1, 2, 4, 8, 16, 32, 64)
         self.dropout = 0.1  # Default: 0.2
         self.ri_inp = True  # if input is Real/Imaginary (True) or Magnintude (False)
-        self.use_bn = False  # Usage of BN layers in Residual blocks
+        self.use_bn = True  # Usage of BN layers in Residual blocks
         self.resample_with_conv = False  # Dowsampling with conv2d
         self.create_mask = False  # wether to create a mask to apply for othe input
         self.continuous_emb = False  # select if time embedding is continuous or discrete

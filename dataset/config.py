@@ -13,7 +13,7 @@ class Config:
 
     def __init__(self):
         # audio config
-        self.inp_type = "flac"  # 'wav' or 'flac'
+        self.inp_type = "wav"  # 'wav' or 'flac'
         self.sr = 44100  # sample rate
         self.dur = 2  # duration in seconds
         self.lufs = -28.0  # for audio normalizing
@@ -50,7 +50,7 @@ class Config:
         # 'ri_mag_phase': for GaGNet with Real and Imaginary Parts enchanced with magnitude and phase
         # 'ri': for cold diffusion UNet, DCUNet, DCCRN with Real and Imaginary Parts
         self.val_split = 0.2
-        self.batch_size = 8  # 24
+        self.batch_size = 6  # 24
 
     def window_fn(self):
         """Return window generator.
