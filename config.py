@@ -16,7 +16,7 @@ class TrainConfig:
     def __init__(self):
         # optimizer
         self.lr_policy = "fixed"
-        self.learning_rate = 5e-5
+        self.learning_rate = 1e-4
         # self.lr_policy = 'noam'
         # self.learning_rate = 1
         # self.lr_params = {
@@ -30,7 +30,7 @@ class TrainConfig:
         # global params
         self.diffusions_steps = 10
         self.epochs = 200
-        self.patience = 7
+        self.patience = 6
         self.gen_val_batch = True # generate random val batch after epoch
 
         # path config

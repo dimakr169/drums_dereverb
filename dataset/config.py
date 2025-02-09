@@ -50,7 +50,7 @@ class Config:
         # 'ri_mag_phase': for GaGNet with Real and Imaginary Parts enchanced with magnitude and phase
         # 'ri': for cold diffusion UNet, DCUNet, DCCRN with Real and Imaginary Parts
         self.val_split = 0.2
-        self.batch_size = 6  # 24
+        self.batch_size = 5  # 24
 
     def window_fn(self):
         """Return window generator.

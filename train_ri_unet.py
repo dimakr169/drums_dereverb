@@ -399,6 +399,7 @@ class ColdRIUNetTrainer:
                 patience = 0
                 self.ckpt_manager.save()
                 curr_loss = val_loss
+                best_loss = val_loss
                 if self.train_params.gen_val_batch:  # whether generate random batch
                     self.generate_random_batch(epoch)
 
@@ -411,13 +412,14 @@ class ColdRIUNetTrainer:
 
             if patience > self.train_params.patience:
                 print("Terminating the training.")
+                print("Best val loss stopped to", best_loss)             
                 break
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--data-dir", default='data/out_gmd')
-    parser.add_argument("--model-name", default="CDiff_RI_gmd")
+    parser.add_argument("--data-dir", default='data/out_combined')
+    parser.add_argument("--model-name", default="CDiff_RI_combined_double")
     parser.add_argument("--gpu", default=0)  # set GPU
     args = parser.parse_args()
 
@@ -452,4 +454,10 @@ if __name__ == "__main__":
     # Start training
     trainer.train()
 
-#CDiff_RI_gmd 16 epochs ~1.59 Noise Loss
+#CDiff_RI_gmd 27 checkpoints ~1.52 Noise Loss
+
+#Diff_RI_combined 17 checkpoints
+#Best val loss stopped to 3.1997
+#Diff_RI_combined_pre_5e-5
+#Best val loss stopped to 3.8514
+
