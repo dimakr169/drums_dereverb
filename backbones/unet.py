@@ -328,6 +328,17 @@ class UNet(models.Model):
             layers.Conv2D(out_channels, (3, 3), (1, 1), padding="same"),
         ]
 
+    def freeze_encoder(self):
+        """Freeze the encoder layers (pre-process and downsampling)."""
+        # Freeze pre-processing layer
+        self.pre_process.trainable = False
+
+        # Freeze all downsampling blocks
+        for down_block in self.downsampling:
+            for layer in down_block:
+                layer.trainable = False
+
+
     def call(self, inp):
 
         x = inp[0]
