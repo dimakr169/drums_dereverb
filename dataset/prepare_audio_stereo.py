@@ -1,22 +1,20 @@
 import argparse
 import os
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
+from pathlib import Path
 
 import numpy as np
 import soundfile as sf
 
-from audiomentations import Compose, PitchShift, TimeStretch
+from audiomentations import Compose, PitchShift, TimeStretch, SevenBandParametricEQ
 from config import Config
 
-from iir import get_random_eq_values
 from preprocess_utils import (
-    create_rir_conds,
-    create_rir_conds_rir_generator,
+    create_rir_conds_stereo,
     detect_energy,
     set_loudness,
     trim_audio,
 )
-
 
 def load_drum_files(data_dir):
     """
@@ -25,7 +23,7 @@ def load_drum_files(data_dir):
     drum_files = []
     for root, _, files in os.walk(data_dir):
         for file in files:
-            if file.endswith(".wav") and "drums" in file:
+            if file.endswith(".wav"):
                 drum_files.append(os.path.join(root, file))
     return drum_files
 
@@ -35,8 +33,8 @@ def process_item(file_path, pre_params, anechoic_path, reverb_path):
     try:
         audio_ex, sr = sf.read(file_path)
         # Convert to mono if it's multi-channel
-        if len(audio_ex.shape) > 1:  # If the audio has more than one channel
-            audio_ex = np.mean(audio_ex, axis=1)  # Average across channels to make mono
+        if len(audio_ex.shape) != 2:  # If the audio is not stereo
+            raise ValueError("Audio file is not stereo.")
 
         # Convert audio to np.float32
         audio_ex = audio_ex.astype(np.float32)
@@ -46,7 +44,7 @@ def process_item(file_path, pre_params, anechoic_path, reverb_path):
     except Exception as e:
         print(f"Error reading file {file_path}: {e}")
         return
-
+    
     # Extract the name of the song from the path
     audio_filename = os.path.basename(os.path.dirname(file_path))
 
@@ -69,17 +67,14 @@ def process_item(file_path, pre_params, anechoic_path, reverb_path):
                     # Augment with audiomentations
                     augment = Compose(
                         [
-                            TimeStretch(min_rate=0.85, max_rate=1.15, p=0.5),
-                            PitchShift(min_semitones=-2, max_semitones=2, p=0.5),
+                            TimeStretch(min_rate=0.9, max_rate=1.1, p=0.5),
+                            PitchShift(min_semitones=-1, max_semitones=1, p=0.5),
+                            SevenBandParametricEQ(min_gain_db=-6.0, max_gain_db=6.0, p=0.5)
                         ]
                     )
-                    chunk_aug = augment(chunk, sample_rate=pre_params.sr)
-                    chunk_aug = set_loudness(chunk_aug, pre_params.sr, LUFS=pre_params.lufs)
-                    
-                    # Apply random 6-band PEQ
-                    peq, _ = get_random_eq_values(40, pre_params.sr)
-                    chunk_aug = peq.apply_eq(chunk_aug)
-                    
+                    chunk_aug = augment(np.swapaxes(chunk, 0, 1), sample_rate=pre_params.sr)
+                    chunk_aug = set_loudness(np.swapaxes(chunk_aug, 0, 1), pre_params.sr, LUFS=pre_params.lufs)
+
                     # Sample T60 and room dimensions
                     t60 = np.random.uniform(pre_params.t60_r[0], pre_params.t60_r[1])
                     room_dim = np.array(
@@ -92,8 +87,8 @@ def process_item(file_path, pre_params, anechoic_path, reverb_path):
                         ]
                     )
                     
-                    # Create clean and reverberant files RIR-GENERATOR version
-                    lossy_ex, dry_ex = create_rir_conds_rir_generator(
+                    # Create clean and reverberant files with pyroomaccoustics stereo
+                    lossy_ex, dry_ex = create_rir_conds_stereo(
                         t60,
                         room_dim,
                         pre_params.min_distance_to_wall,
@@ -102,13 +97,13 @@ def process_item(file_path, pre_params, anechoic_path, reverb_path):
                     )
 
                     # Normalize
-                    lossy_ex = set_loudness(lossy_ex, pre_params.sr, LUFS=pre_params.lufs)
-                    dry_ex = set_loudness(dry_ex, pre_params.sr, LUFS=pre_params.lufs)
+                    lossy_ex = set_loudness(np.swapaxes(lossy_ex, 0, 1), pre_params.sr, LUFS=pre_params.lufs)
+                    dry_ex = set_loudness(np.swapaxes(dry_ex, 0, 1), pre_params.sr, LUFS=pre_params.lufs)
                     
                     # Trim to fixed duration
                     lossy_ex = trim_audio(lossy_ex, pre_params.sr, pre_params.dur)
                     dry_ex = trim_audio(dry_ex, pre_params.sr, pre_params.dur)
-
+    
                     # Validate outputs
                     if lossy_ex is None or lossy_ex.size == 0 or np.allclose(lossy_ex, -1):
                         print(f"Invalid reverberant audio for {audio_filename}, chunk {idx}, augmentation {cnt}")
@@ -119,8 +114,9 @@ def process_item(file_path, pre_params, anechoic_path, reverb_path):
                         continue                   
                     
                     # Check if the audio is not empty before writing to file
-                    if len(lossy_ex) > 0 and len(dry_ex) > 0:
-                        try:
+                    if detect_energy(lossy_ex, threshold=pre_params.threshold) and \
+                         detect_energy(dry_ex, threshold=pre_params.threshold):
+                        try:                       
                             # Write to files
                             sf.write(
                                 os.path.join(
@@ -151,13 +147,14 @@ def process_item(file_path, pre_params, anechoic_path, reverb_path):
         else:
             print(f"Energy exception for {audio_filename}, chunk {idx}")
 
+current_dir = Path.cwd()
 
 def main(args):
     ## Load configuration
     pre_params = Config()
 
     # Find all drum files in the specified directory
-    data_dir = "./data/musdb18hq_clean"  
+    data_dir = current_dir.parent / "data/gmd_clean"  
     drum_files = load_drum_files(data_dir)
     print(f"Found {len(drum_files)} drum files.")
 
@@ -166,7 +163,16 @@ def main(args):
     os.makedirs(anechoic_path, exist_ok=True)
     reverb_path = os.path.join(args.out_path, "reverb")
     os.makedirs(reverb_path, exist_ok=True)
+    
+    with ProcessPoolExecutor(max_workers=os.cpu_count()) as executor:
+        futures = [
+            executor.submit(process_item, item, pre_params, anechoic_path, reverb_path)
+            for item in drum_files
+        ]
+        for future in as_completed(futures):
+            future.result()
 
+    '''
     # Process dataset with multithreading
     futures = []
     with ThreadPoolExecutor(max_workers=os.cpu_count()) as executor:
@@ -179,13 +185,13 @@ def main(args):
 
         for future in as_completed(futures):
             future.result()
-
+    '''
     print("Completed!")
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--out-path", default="./data/out_musdb18hq", type=str)
+    parser.add_argument("--out-path", default=current_dir.parent / "data/out_gmd_stereo", type=str)
 
     args = parser.parse_args()
     main(args)

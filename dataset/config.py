@@ -13,7 +13,7 @@ class Config:
 
     def __init__(self):
         # audio config
-        self.inp_type = "flac"  # 'wav' or 'flac'
+        self.inp_type = "wav"  # 'wav' or 'flac'
         self.sr = 44100  # sample rate
         self.dur = 2  # duration in seconds
         self.lufs = -28.0  # for audio normalizing
@@ -21,7 +21,7 @@ class Config:
 
         # RIR parameters
         # following paper: https://arxiv.org/abs/2212.11851
-        self.t60_r = [0.4, 1.2]  # Range for reverb time in seconds
+        self.t60_r = [0.4, 1.5]  # Range for reverb time in seconds
         self.room_dim_r = [
             5,
             15,

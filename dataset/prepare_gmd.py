@@ -78,7 +78,7 @@ def process_item(file_path, naming_prefix, pre_params, anechoic_path, reverb_pat
                     )
                     chunk_aug = augment(chunk, sample_rate=pre_params.sr)
                     chunk_aug = set_loudness(chunk_aug, pre_params.sr, LUFS=pre_params.lufs)
-                    peq, _ = get_random_eq_values(70, pre_params.sr)
+                    peq, _ = get_random_eq_values(50, pre_params.sr)
                     chunk_aug = peq.apply_eq(chunk_aug)
                     
                     # Reverberation
