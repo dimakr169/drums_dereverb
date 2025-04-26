@@ -14,23 +14,20 @@ class TrainConfig:
     """Configuration for training loop."""
 
     def __init__(self):
-        # optimizer
-        self.lr_policy = "fixed"
-        self.learning_rate = 1e-4
-        # self.lr_policy = 'noam'
-        # self.learning_rate = 1
-        # self.lr_params = {
-        #     'warmup_steps': 4000,
-        #     'channels': 64
-        # }
+        # choose "fixed"  or  "cosine_restart"
+        self.lr_policy     = "cosine_restart"
+        self.learning_rate = 3e-4          # base LR  (ignored when cosine sets its own)
+        self.warmup_steps  = 2_000          # optional warm‑up inside cosine
+        self.restart_epochs = 30            # cosine restart period
+        # Adam hyper‑params
         self.beta1 = 0.9
-        self.beta2 = 0.98
-        self.eps = 1e-9
+        self.beta2 = 0.95
+        self.eps   = 1e-9
 
         # global params
-        self.diffusions_steps = 10
+        self.diffusions_steps = 16 #10 default
         self.epochs = 200
-        self.patience = 6
+        self.patience = 10
         self.gen_val_batch = True # generate random val batch after epoch
 
         # path config
@@ -38,7 +35,7 @@ class TrainConfig:
         self.ckpt = "./ckpt"
 
         # model name
-        self.name = "cold_diff_10steps"
+        self.name = "cold_diff_16steps"
 
     def lr(self):
         """Generate proper learning rate scheduler."""

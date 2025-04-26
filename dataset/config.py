@@ -37,9 +37,11 @@ class Config:
 
         # stft
         self.hop = (
-            341  # for preventing shape mismatchin in UNet encoding-decoding block
+            #341  # for preventing shape mismatchin in UNet encoding-decoding block
+            #109
+            177
         )
-        self.win = 1022
+        self.win = 510 #1022
         self.fft = self.win
         self.win_fn = "hann"
 
@@ -50,7 +52,7 @@ class Config:
         # 'ri_mag_phase': for GaGNet with Real and Imaginary Parts enchanced with magnitude and phase
         # 'ri': for cold diffusion UNet, DCUNet, DCCRN with Real and Imaginary Parts
         self.val_split = 0.2
-        self.batch_size = 5  # 24
+        self.batch_size = 6  # 24
 
     def window_fn(self):
         """Return window generator.

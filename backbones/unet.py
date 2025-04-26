@@ -1,5 +1,6 @@
 import math
 import tensorflow as tf
+import tensorflow_addons as tfa  
 from tensorflow.keras import layers, models
 
 embedding_min_frequency = 1.0
@@ -98,68 +99,89 @@ def kernel_init(scale):
         scale, mode="fan_avg", distribution="uniform"
     )
 
-
 @tf.keras.utils.register_keras_serializable()
 class AttentionBlock(layers.Layer):
-    """Applies self-attention.
-
-    Args:
-        units: Number of units in the dense layers.
-        groups: Number of groups to be used for GroupNormalization layer (not used).
     """
+    2‑D self‑attention that works on (batch, height, width, channels) feature maps.
 
-    def __init__(self, channels, groups=8, **kwargs):
-        self.channels = channels
-        self.groups = groups
+    •  Flattens spatial dims → sequence length L = H×W
+    •  Runs Multi‑Head Self‑Attention with `num_heads` heads
+    •  Reshapes back to (H, W) and adds a residual projection
+
+    Parameters
+    ----------
+    channels : int
+        Number of channels (C) coming **into** the block.
+    num_heads : int, optional
+        How many attention heads. 8 is a good default for C ≥ 128.
+    """
+    def __init__(self, channels: int, num_heads: int = 8, **kwargs):
         super().__init__(**kwargs)
+        self.channels = channels
+        self.num_heads = num_heads
 
-        # self.norm = layers.GroupNormalization(groups=groups)
-        self.query = layers.Dense(self.channels, kernel_initializer=kernel_init(1.0))
-        self.key = layers.Dense(self.channels, kernel_initializer=kernel_init(1.0))
-        self.value = layers.Dense(self.channels, kernel_initializer=kernel_init(1.0))
-        self.proj = layers.Dense(self.channels, kernel_initializer=kernel_init(0.0))
+        # --- Layers --------------------------------------------------------
+        # Multi‑Head Self‑Attention:
+        key_dim = channels // num_heads   # (so total dim = channels)
+        # Pass attention_axes here at construction time
+        self.mha = tf.keras.layers.MultiHeadAttention(
+            num_heads=num_heads,
+            key_dim=key_dim,
+            attention_axes=(1,)        # ← now configured properly
+        )
 
+        # Linear projection after attention (like a Transformer feed‑forward)
+        self.proj = layers.Dense(
+            self.channels,
+            kernel_initializer=kernel_init(0.0),
+            name="proj"
+        )
+
+        # Normalisation before attention – GroupNorm is transient‑friendly.
+        self.norm = tfa.layers.GroupNormalization(
+            groups=4, axis=-1, epsilon=1e-5, name="gn"
+        )
+
+    # --------------------------------------------------------------------- #
     def call(self, inputs):
-        batch_size = tf.shape(inputs)[0]
-        height = tf.shape(inputs)[1]
-        width = tf.shape(inputs)[2]
-        scale = tf.cast(self.channels, tf.float32) ** (-0.5)
+        """
+        Parameters
+        ----------
+        inputs : Tensor [B, H, W, C]
 
-        # Compute query, key, and value
-        q = self.query(inputs)  # Shape: [B, H, W, C]
-        k = self.key(inputs)    # Shape: [B, H, W, C]
-        v = self.value(inputs)  # Shape: [B, H, W, C]
+        Returns
+        -------
+        Tensor [B, H, W, C]  (same shape, residual connection applied)
+        """
+        # 1) Normalise
+        x = self.norm(inputs)                         # [B, H, W, C]
 
-        # Reshape to [B, H*W, C]
-        q = tf.reshape(q, [batch_size, height * width, self.channels])
-        k = tf.reshape(k, [batch_size, height * width, self.channels])
-        v = tf.reshape(v, [batch_size, height * width, self.channels])        
+        # 2) Flatten spatial dims → sequence
+        B, H, W, C = tf.unstack(tf.shape(x))
+        seq = tf.reshape(x, [B, H * W, C])            # [B, L, C]  where L = H×W
 
-        # Compute attention scores
-        attn_scores = tf.matmul(q, k, transpose_b=True) * scale  # [B, H*W, H*W]
-        attn_probs = tf.nn.softmax(attn_scores, axis=-1)  # Normalize scores
+        # 3) Self‑attention (queries = keys = values = seq)
+        attn_out = self.mha(seq, seq, seq)           # [B, L, C]
 
-        # Compute attention output
-        attn_output = tf.matmul(attn_probs, v)  # [B, H*W, C]
-        attn_output = tf.reshape(attn_output, [batch_size, height, width, self.channels])
+        # 4) Back to (H, W)
+        attn_out = tf.reshape(attn_out, [B, H, W, C])
 
-        # Project back to original dimensions
-        proj_output = self.proj(attn_output)
-
-        # Add residual connection
-        return inputs + proj_output
+        # 5) Output projection + residual
+        out = inputs + self.proj(attn_out)
+        return out
 
 
 @tf.keras.utils.register_keras_serializable()
 class ResNetBlock(layers.Layer):
     def __init__(
-        self, in_ch, out_ch=None, conv_shortcut=False, use_bn=False, dropout=0.0
+        self, in_ch, out_ch=None, conv_shortcut=False, use_norm=False, norm_type = 'group', dropout=0.0
     ):
         super(ResNetBlock, self).__init__()
         self.in_ch = in_ch
         self.out_ch = out_ch
         self.conv_shortcut = conv_shortcut
-        self.use_bn = use_bn
+        self.use_norm = use_norm
+        self.norm_type = norm_type
         self.dropout = dropout
 
         if self.out_ch is None:
@@ -167,9 +189,15 @@ class ResNetBlock(layers.Layer):
         self.c_not_out_ch = self.in_ch != self.out_ch
 
         # GN/BN layers
-        if self.use_bn:
-            self.group_norm1 = tf.keras.layers.BatchNormalization()
-            self.group_norm3 = tf.keras.layers.BatchNormalization()
+        if self.use_norm:
+            if self.norm_type == "group":
+                gn = lambda: tfa.layers.GroupNormalization(
+                groups=4, epsilon=1e-5)
+            else:                                              # fallback
+                gn = lambda: tf.keras.layers.BatchNormalization(epsilon=1e-5)
+
+            self.group_norm1 = gn()
+            self.group_norm3 = gn()
 
         # Rest Layers.
         self.non_linear1 = layers.Activation("swish")
@@ -187,7 +215,7 @@ class ResNetBlock(layers.Layer):
     def call(self, inputs, temb):
         x = inputs
 
-        if self.use_bn:
+        if self.use_norm:
             x = self.group_norm1(x)
         x = self.non_linear1(x)
         x = self.conv1(x)
@@ -204,7 +232,7 @@ class ResNetBlock(layers.Layer):
         # Add in timestep embedding, ensuring the shape is statically known.
         x += temb_processed
 
-        if self.use_bn:
+        if self.use_norm:
             x = self.group_norm3(x)
         x = self.non_linear3(x)
         x = self.dropout3(x)
@@ -233,7 +261,8 @@ class UNet(models.Model):
         self.create_mask = self.config.create_mask # whether creates mask or not
         self.continuous_emb = self.config.continuous_emb 
         self.ri_inp = self.config.ri_inp # Real/Imaginary or Magnitude
-        self.use_bn = self.config.use_bn  # if BN layers to be used on Residual blocks
+        self.use_norm = self.config.use_norm  # if BN/GN layers to be used on Residual blocks
+        self.norm_type = self.config.norm_type # "GroupNormalization (4) or Batch Normalization
 
 
         self.in_embed = [
@@ -245,7 +274,9 @@ class UNet(models.Model):
 
 
         # Downsampling
-        self.pre_process = layers.Conv2D(self.channels, (3, 3), padding="same")
+        # self.pre_process = layers.Conv2D(self.channels, (3, 3), padding="same")
+        # 9 × 1 catches broadband click, stride 1 keeps shape
+        self.pre_process = layers.Conv2D(self.channels, kernel_size=(9, 1), padding="same")
         self.downsampling = []
         channel_track = self.channels
         for i_level in range(self.num_resolutions):
@@ -255,14 +286,10 @@ class UNet(models.Model):
                     ResNetBlock(
                         in_ch=channel_track,
                         out_ch=self.channels * self.ch_mult[i_level],
-                        use_bn=self.use_bn,
+                        use_norm=self.use_norm,
                         dropout=self.dropout,
                     )
                 )
-                if self.use_attention:
-                    downsampling_block.append(
-                        AttentionBlock(channels=self.channels * self.ch_mult[i_level])
-                    )
             if i_level != self.num_resolutions - 1:
                 downsampling_block.append(
                     Downsample(
@@ -277,13 +304,15 @@ class UNet(models.Model):
         # Middle
         self.middle = [
                 ResNetBlock(
-                    in_ch=channel_track, use_bn=self.use_bn, dropout=self.dropout
+                    in_ch=channel_track,use_norm=self.use_norm,
+                        norm_type=self.norm_type, dropout=self.dropout
                 )
         ]
         if self.use_attention:
             self.middle.append(AttentionBlock(channels=channel_track))
         self.middle.append(ResNetBlock(
-                    in_ch=channel_track, use_bn=self.use_bn, dropout=self.dropout
+                    in_ch=channel_track, use_norm=self.use_norm,
+                        norm_type=self.norm_type, dropout=self.dropout
                 ))
 
 
@@ -298,15 +327,11 @@ class UNet(models.Model):
                     ResNetBlock(
                         in_ch=channel_track,
                         out_ch=self.channels * self.ch_mult[i_level],
-                        use_bn=self.use_bn,
+                        use_norm=self.use_norm,
+                        norm_type=self.norm_type,
                         dropout=self.dropout,
                     )
                 )
-                # Add attention if enabled.
-                if self.use_attention:
-                    upsampling_block.append(
-                        AttentionBlock(channels=self.channels * self.ch_mult[i_level])
-                    )
             # Upsample.
             if i_level != 0:
                 upsampling_block.append(
@@ -352,17 +377,10 @@ class UNet(models.Model):
         hs = [self.pre_process(x)]
         for i in range(len(self.downsampling)):
             block = self.downsampling[i]
-            if self.use_attention:  # Attention applied at all levels
-                total_res_blocks = self.num_res_blocks * 2
-                for idx_block in range(0, total_res_blocks, 2):
-                    h = block[idx_block](hs[-1], temb)  # ResNetBlock
-                    h = block[idx_block + 1](h)  # AttentionBlock
-                    hs.append(h)
-            else:  # No attention
-                total_res_blocks = self.num_res_blocks
-                for idx_block in range(total_res_blocks):
-                    h = block[idx_block](hs[-1], temb)  # ResNetBlock only
-                    hs.append(h)
+            total_res_blocks = self.num_res_blocks
+            for idx_block in range(total_res_blocks):
+                h = block[idx_block](hs[-1], temb)  # ResNetBlock only
+                hs.append(h)
             # Additional downsampling layers, if any (e.g., Downsample)
             if len(block) > total_res_blocks:
                 for extra_lay in block[total_res_blocks:]:
@@ -379,15 +397,9 @@ class UNet(models.Model):
         # Upsampling
         for i in range(len(self.upsampling)):
             block = self.upsampling[i]
-            if self.use_attention:  # Attention applied at all levels
-                total_res_blocks = self.num_res_blocks * 2 + 1
-                for idx_block in range(0, total_res_blocks, 2):
-                    h = block[idx_block](tf.concat([h, hs.pop()], axis=-1), temb)  # ResNetBlock
-                    h = block[idx_block + 1](h)  # AttentionBlock
-            else:  # No attention
-                total_res_blocks = self.num_res_blocks + 1
-                for idx_block in range(total_res_blocks):
-                    h = block[idx_block](tf.concat([h, hs.pop()], axis=-1), temb)  # ResNetBlock only
+            total_res_blocks = self.num_res_blocks + 1
+            for idx_block in range(total_res_blocks):
+                h = block[idx_block](tf.concat([h, hs.pop()], axis=-1), temb)  # ResNetBlock only
             # Upsampling layers, if any (e.g., Upsample)
             if len(block) > total_res_blocks:
                 for extra_lay in block[total_res_blocks:]:

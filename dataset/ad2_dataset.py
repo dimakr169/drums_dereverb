@@ -30,7 +30,7 @@ class AD2:
         # load paths and split them
         all_files = glob.glob(
             os.path.join(data_dir, "reverb", "*." + self.config.inp_type)
-        )  # flac or wav
+        ) # flac or wav
         train_set, val_set = train_test_split(
             all_files, test_size=self.config.val_split
         )
