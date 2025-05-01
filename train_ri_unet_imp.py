@@ -56,11 +56,13 @@ class ColdRIUNetTrainer:
         self.tr_dataset, self.val_dataset = self.ad2_data.create_datasets()
 
         # ---------- learning‑rate schedule selector -----------------
+        steps_per_epoch = len(self.tr_dataset)
+
         if self.train_params.lr_policy == "fixed":
             lr_schedule = float(self.train_params.learning_rate)
 
         elif self.train_params.lr_policy == "cosine_restart":
-            steps_per_epoch = len(self.tr_dataset)
+
             first_decay = steps_per_epoch * self.train_params.restart_epochs
 
             lr_schedule = tf.keras.optimizers.schedules.CosineDecayRestarts(
@@ -71,6 +73,48 @@ class ColdRIUNetTrainer:
                 alpha=1e-6
             )
 
+        elif train_params.lr_policy == 'warmup_cosine':
+            total_steps  = steps_per_epoch * self.train_params.epochs
+            warmup_steps = int(steps_per_epoch * self.train_params.warmup_epochs)
+
+            # 1) Warm-up schedule
+            warmup = tf.keras.optimizers.schedules.PolynomialDecay(
+                initial_learning_rate=self.train_params.warmup_initial_lr,
+                decay_steps=warmup_steps,
+                end_learning_rate=float(self.train_params.learning_rate),
+                power=1.0
+            )
+
+            # 2) Cosine decay schedule
+            cosine = tf.keras.optimizers.schedules.CosineDecay(
+                initial_learning_rate=float(self.train_params.learning_rate),
+                decay_steps=total_steps - warmup_steps,
+                alpha=self.train_params.cosine_floor_factor
+            )
+
+            # 3) Inline “Concatenate” substitute
+            class _WarmupCosine(tf.keras.optimizers.schedules.LearningRateSchedule):
+                def __init__(self, warmup, cosine, warmup_steps):
+                    self.warmup = warmup
+                    self.cosine = cosine
+                    self.warmup_steps = warmup_steps
+                def __call__(self, step):
+                    return tf.where(
+                        step < self.warmup_steps,
+                        self.warmup(step),
+                        self.cosine(step - self.warmup_steps)
+                    )
+                def get_config(self):
+                    return {
+                        'warmup_steps': self.warmup_steps,
+                        'initial_learning_rate': self.warmup.initial_learning_rate,
+                        'end_learning_rate': getattr(self.warmup, 'end_learning_rate', None),
+                        'decay_steps': getattr(self.cosine, 'decay_steps', None),
+                        'alpha': getattr(self.cosine, 'alpha', None)
+                    }
+
+            lr_schedule = _WarmupCosine(warmup, cosine, warmup_steps)
+
         else:
             raise ValueError("Unknown lr_policy")        
 
@@ -79,14 +123,15 @@ class ColdRIUNetTrainer:
             learning_rate=lr_schedule,
             beta_1=self.train_params.beta1,
             beta_2=self.train_params.beta2,
-            epsilon=1e-9,
+            epsilon=self.train_params.eps
         )
 
-        # --- Exponential Moving‑Average wrapper (decay 0.999)  ### EMA
+        # EMA optimizer
         self.optimizer = tfa.optimizers.MovingAverage(
             base_opt,
-            average_decay=0.999,
+            average_decay=train_params.ema_decay,
         )
+
 
         # initialize noise and audio loss
         self.loss = tf.keras.losses.MeanAbsoluteError()
@@ -124,21 +169,9 @@ class ColdRIUNetTrainer:
         self.train_summary_writer = tf.summary.create_file_writer(train_log_dir)
         self.val_summary_writer = tf.summary.create_file_writer(val_log_dir)
 
-    def diffusion(self, reverb_mags, clean_mags, alpha_bar):
-        def diffusion_step(x):
-            return self._diffusion(x[0], x[1], x[2])
-
-        return tf.map_fn(
-            fn=diffusion_step,
-            elems=[reverb_mags, clean_mags, alpha_bar],
-            fn_output_signature=(tf.float32),
-        )
-
-    def _diffusion(self, reverb_mag, clean_mag, timestep):
-
-        # diffed_mag = timestep * clean_mag + (1 - tf.sqrt(timestep)) * reverb_mag
-        diffed_mag = timestep * clean_mag + (1 - timestep) * reverb_mag
-        return diffed_mag
+    def diffusion(self, reverb_ri, clean_ri, noise_level):
+        α = tf.reshape(noise_level, [-1,1,1,1])
+        return α*clean_ri + (1-α)*reverb_ri
 
     @tf.function
     def train_step(self, inp_tar_ri):
@@ -168,10 +201,12 @@ class ColdRIUNetTrainer:
         with tf.GradientTape() as tape:
             # calculate noise
             est_ri = self.model([noised, timesteps], training=True)
-            est_com, _ = self.get_spec_mag(est_ri)
-            noised_next_com, _ = self.get_spec_mag(noised_next)
-            # calc noise loss
-            noise_loss = self.loss(est_com, noised_next_com) * 100  # as a weight
+            #mixed float precision
+            est_ri = tf.cast(est_ri, tf.float32)
+            # real/imag noise L1
+            er, ei = est_ri[...,0], est_ri[...,1]
+            tr, ti = noised_next[...,0], noised_next[...,1]
+            noise_loss = (self.loss(er, tr) + self.loss(ei, ti)) * 50 #seperate
             # generate audio from predictions
             est_wav = self.get_signal_from_RI_stft(est_ri)
             tar_wav = self.get_signal_from_RI_stft(
@@ -217,10 +252,12 @@ class ColdRIUNetTrainer:
         noised_next = self.diffusion(reverb_ri, clean_ri, noise_level_next)
         # call model and calculate noise
         est_ri = self.model([noised, timesteps], training=False)
-        est_com, _ = self.get_spec_mag(est_ri)
-        noised_next_com, _ = self.get_spec_mag(noised_next)
-        # calc noise loss
-        noise_loss = self.loss(est_com, noised_next_com) * 100  # as a weight
+        #mixed float precision
+        est_ri = tf.cast(est_ri, tf.float32)
+        # real/imag noise L1
+        er, ei = est_ri[...,0], est_ri[...,1]
+        tr, ti = noised_next[...,0], noised_next[...,1]
+        noise_loss = (self.loss(er, tr) + self.loss(ei, ti)) * 50 #seperate
         # generate audio from predictions
         est_wav = self.get_signal_from_RI_stft(est_ri)
         tar_wav = self.get_signal_from_RI_stft(
@@ -250,7 +287,8 @@ class ColdRIUNetTrainer:
         return polar_spec, mag
 
     def get_signal_from_RI_stft(self, ri_stft):
-
+        
+        ri_stft = tf.cast(ri_stft, tf.float32)
         polar_spec = tf.complex(ri_stft[..., 0], ri_stft[..., 1])
 
         signal = tf.signal.inverse_stft(
@@ -265,6 +303,7 @@ class ColdRIUNetTrainer:
 
         return signal
 
+    @tf.function
     def reverse_diffusion(self, inp_ri, step_stop=0):
 
         # calc batch size
@@ -318,7 +357,7 @@ class ColdRIUNetTrainer:
                 sf.write(
                     os.path.join(val_path, "diffused_" + str(t) + ".wav"),
                     pred_wav.numpy(),
-                    44100,
+                    pre_params.sr,
                 )
 
     def train(self):
@@ -393,6 +432,7 @@ class ColdRIUNetTrainer:
             print("----")
 
             # ---------- swap *in* EMA weights ---------- 
+            raw_vars = [v.read_value() for v in self.model.trainable_variables]
             self.optimizer.assign_average_vars(self.model.trainable_variables)
 
             # Validation Loop
@@ -453,11 +493,15 @@ class ColdRIUNetTrainer:
                 print("Best val loss stopped to", best_loss)             
                 break
 
+            # restore raw weights
+            for var, raw in zip(self.model.trainable_variables, raw_vars):
+                var.assign(raw)
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--data-dir", default='data/out_combined')
-    parser.add_argument("--model-name", default="CDiff_RI_combined_IMP")
+    parser.add_argument("--model-name", default="CDiff_RI_combined_IMP2")
     parser.add_argument("--gpu", default=2, type=int)  # set GPU
     args = parser.parse_args()
 
@@ -502,4 +546,6 @@ if __name__ == "__main__":
 #Best val loss stopped to 3.1997
 #Diff_RI_combined_pre_5e-5
 #Best val loss stopped to 3.8514
+
+#IMP Epoch 70 val loss 1.8634 
 

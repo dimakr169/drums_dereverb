@@ -14,15 +14,15 @@ class Config:
         """UNet (Cold Diffusion)"""
         self.num_res_blocks = 2  # Default: 2
         self.use_attention = True  # Apply attention globally (True or False)
-        self.channels = 24  # Default: 16
-        self.ch_mult = (1, 2, 4, 8)  # Default: (1, 2, 4, 8, 16, 32, 64)
+        self.channels = 28  # Default: 16
+        self.ch_mult = (1, 2, 4, 4)  # Default: (1, 2, 4, 8, 16, 32, 64)
         self.dropout = 0.1  # Default: 0.2
         self.ri_inp = True  # if input is Real/Imaginary (True) or Magnintude (False)
-        self.use_norm = True  # Usage of BN or GN layers in Residual blocks
+        self.use_norm = False  # Usage of BN or GN layers in Residual blocks
         self.norm_type = "group"  # "GroupNormalization (4) or Batch Normalization
-        self.resample_with_conv = False  # Dowsampling with conv2d
+        self.resample_with_conv = True  # Dowsampling with conv2d
         self.create_mask = False  # wether to create a mask to apply for othe input
-        self.continuous_emb = False  # select if time embedding is continuous or discrete
+        self.continuous_emb = True  # select if time embedding is continuous or discrete
 
         """GaGNet (Predictive)"""
         self.cin = 2  # number of inputs. 2 for Real and Imaginary
