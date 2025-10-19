@@ -549,3 +549,6 @@ if __name__ == "__main__":
 
 #IMP Epoch 70 val loss 1.8634 
 
+#IMP2 Epoch 74 val loss 1.3539
+
+

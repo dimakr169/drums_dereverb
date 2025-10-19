@@ -1,5 +1,7 @@
 data/
 saved_models/
+pretrained_models/
+selected_examples/
 
 # Exclude all __pycache__ directories anywhere in the project
 __pycache__/
