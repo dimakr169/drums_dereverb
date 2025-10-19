@@ -1,5 +1,4 @@
-import argparse
-import os
+import os, argparse, random
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
@@ -11,6 +10,8 @@ from config import Config
 
 from preprocess_utils import (
     create_rir_conds_stereo,
+    create_rir_generator_stereo,
+    create_rir_conds_openair,
     detect_energy,
     set_loudness,
     trim_audio,
@@ -58,8 +59,8 @@ def process_item(file_path, pre_params, anechoic_path, reverb_path):
         # Create the augmentation pipeline once per chunk
         augment = Compose(
             [
-                TimeStretch(min_rate=0.9, max_rate=1.1, p=0.5),
-                PitchShift(min_semitones=-1, max_semitones=1, p=0.5),
+                TimeStretch(min_rate=0.9, max_rate=1.1, p=0.25),
+                PitchShift(min_semitones=-1, max_semitones=1, p=0.25),
                 SevenBandParametricEQ(min_gain_db=-6.0, max_gain_db=6.0, p=0.5),
             ]
         )
@@ -80,13 +81,31 @@ def process_item(file_path, pre_params, anechoic_path, reverb_path):
                     ]
                 )
 
-                lossy_ex, dry_ex = create_rir_conds_stereo(
-                    t60,
-                    room_dim,
-                    pre_params.min_distance_to_wall,
-                    pre_params.sr,
-                    chunk_aug,
-                )
+                # Random Pick of generation method
+                rir_method = random.choice(["pyroom", "rirgen", "real"])
+                if rir_method == "pyroom":
+                    lossy_ex, dry_ex = create_rir_conds_stereo(
+                        t60,
+                        room_dim,
+                        pre_params.min_distance_to_wall,
+                        pre_params.sr,
+                        chunk_aug,
+                    )
+                elif rir_method == "rirgen":
+                    lossy_ex, dry_ex = create_rir_generator_stereo(
+                        t60,
+                        room_dim,
+                        pre_params.min_distance_to_wall,
+                        pre_params.sr,
+                        chunk_aug,
+                    )
+                else: # real
+                    lossy_ex, dry_ex = create_rir_conds_openair(
+                        pre_params.sr, 
+                        chunk_aug, 
+                        rir_folder="C:\\Users\\dimak\\Desktop\\MyWork\\Kineza_2.0\\DrumsDereverb\\data\\OpenAir_RIRs_stereo", 
+                        mix_range=(0.0, 1.0)
+                    )
 
                 lossy_ex = set_loudness(np.swapaxes(lossy_ex, 0, 1), pre_params.sr, LUFS=pre_params.lufs)
                 dry_ex = set_loudness(np.swapaxes(dry_ex, 0, 1), pre_params.sr, LUFS=pre_params.lufs)
@@ -116,7 +135,9 @@ def process_batch(file_paths, pre_params, anechoic_path, reverb_path):
 def main(args):
     pre_params = Config()
     current_dir = Path.cwd()
-    data_dir = current_dir.parent / "data/gmd_clean"
+    # data_dir = current_dir.parent / "data/test"
+    data_dir = current_dir.parent / "DrumsDereverb/data/test" 
+    print(data_dir)
     drum_files = load_drum_files(data_dir)
     print(f"Found {len(drum_files)} drum files.")
 

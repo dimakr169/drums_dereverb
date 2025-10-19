@@ -5,8 +5,8 @@ Created on Thu Jan  4 15:17:22 2024
 @author: dimak
 """
 
-import statistics
-
+import os, random
+import soundfile as sf
 import numpy as np
 import pyloudnorm as pyln
 import pyroomacoustics as pra
@@ -125,106 +125,51 @@ def simulate_room_for_channel(mic_pos, source_pos, audio_mono, room_dim, fs, abs
     signal = np.array(room.mic_array.signals)[0]
     return np.squeeze(signal)
 
-def create_rir_conds_stereo(t60, room_dim, min_distance_to_wall, fs, audio_ex,
-                            stereo_ratio=0.7, mic_spacing=0.2):
+
+
+def create_rir_conds_stereo(t60, room_dim, min_distance_to_wall, fs, audio_ex, mic_spacing=0.2):
     """
-    Create stereo examples (reverberant and dry) using two modes:
-      - 70% chance (common mode): apply the same RIR to each channel separately,
-        so the original stereo differences in audio_ex are preserved.
-      - 30% chance (different mode): simulate each channel separately and blend the right channel.
-      
-    Parameters:
-      t60: Desired reverberation time for the reverberant simulation.
-      room_dim: Room dimensions (length, width, height).
-      min_distance_to_wall: Minimum distance from any wall for mic/source.
-      fs: Sampling frequency.
-      audio_ex: Stereo input signal of shape (samples, 2).
-      stereo_ratio: In different mode, right channel = stereo_ratio * left + (1-stereo_ratio)*right.
-      mic_spacing: Distance between the left and right microphones.
-      
-    Returns:
-      Tuple (reverberant_stereo, dry_stereo) each of shape (2, N).
+    Create stereo reverberant and dry signals where reverberation is spatially *correlated*
+    (same RIR applied to both channels), to avoid artificial stereo drift.
     """
-    # --- Split the stereo input into left and right channels ---
     left_audio = audio_ex[:, 0]
     right_audio = audio_ex[:, 1]
 
-    # --- Sample source and central microphone positions ---
-    center_mic_position = np.array([
+    # --- Shared mic and source for reverb field ---
+    mic_center = np.array([
         np.random.uniform(min_distance_to_wall, room_dim[n] - min_distance_to_wall)
         for n in range(3)
     ])
-    source_position = np.array([
+    source_pos = np.array([
         np.random.uniform(min_distance_to_wall, room_dim[n] - min_distance_to_wall)
         for n in range(3)
     ])
 
-    # --- Define left and right microphone positions ---
-    left_mic = center_mic_position.copy()
-    right_mic = center_mic_position.copy()
-    left_mic[0] -= mic_spacing / 2.0
-    right_mic[0] += mic_spacing / 2.0
+    # Use one RIR for both channels to ensure realistic stereo balance
+    shared_mic = mic_center.reshape(3, 1)
+    absorption, max_order = pra.inverse_sabine(t60, room_dim)
+    shared_rir = get_common_rir(shared_mic, source_pos, room_dim, fs, absorption, max_order, ray_tracing=True)
 
-    # --- Reverberant Simulation ---
-    e_absorption, max_order = pra.inverse_sabine(t60, room_dim)
-    if np.random.rand() < 0.7:
-        # 70% chance: use a common RIR.
-        common_rir = get_common_rir(left_mic.reshape(3, 1), source_position,
-                                    room_dim, fs, e_absorption, max_order, ray_tracing=True)
-        # Convolve each channel separately so that the original stereo differences remain.
-        left_rev = fftconvolve(left_audio, common_rir)[:len(left_audio)]
-        right_rev = fftconvolve(right_audio, common_rir)[:len(right_audio)]
-    else:
-        # 30% chance: simulate each channel separately.
-        left_rev = simulate_room_for_channel(left_mic.reshape(3, 1), source_position,
-                                             left_audio, room_dim, fs, e_absorption, max_order, ray_tracing=True)
-        right_rev = simulate_room_for_channel(right_mic.reshape(3, 1), source_position,
-                                              right_audio, room_dim, fs, e_absorption, max_order, ray_tracing=True)
-        # Ensure same length and blend right channel slightly.
-        min_len = min(len(left_rev), len(right_rev))
-        left_rev = left_rev[:min_len]
-        right_rev = right_rev[:min_len]
-        right_rev = stereo_ratio * left_rev + (1 - stereo_ratio) * right_rev
+    rev_left = fftconvolve(left_audio, shared_rir, mode="full")[:len(left_audio)]
+    rev_right = fftconvolve(right_audio, shared_rir, mode="full")[:len(right_audio)]
+    reverberant_stereo = np.vstack([rev_left, rev_right])
 
-    reverberant_stereo = np.vstack([left_rev, right_rev])
+    # --- Fixed mic-source for dry version (no stereo drift) ---
+    mic_center_dry = np.array([2.0, 1.5, 1.2])
+    source_dry = np.array([2.0, 2.0, 1.2])
+    left_mic_dry = mic_center_dry.copy(); left_mic_dry[0] -= mic_spacing / 2.0
+    right_mic_dry = mic_center_dry.copy(); right_mic_dry[0] += mic_spacing / 2.0
 
-    # --- Dry (Anechoic) Simulation ---
-    # For the dry case, you might want to preserve the stereo image even more closely.
-    # Here we follow the same common/different mode strategy.
-    if np.random.rand() < 0.7:
-        common_rir_dry = get_common_rir(left_mic.reshape(3, 1), source_position,
-                                        room_dim, fs, 0.99, 0, ray_tracing=False)
-        left_dry = fftconvolve(left_audio, common_rir_dry)[:len(left_audio)]
-        right_dry = fftconvolve(right_audio, common_rir_dry)[:len(right_audio)]
-    else:
-        left_dry = simulate_room_for_channel(left_mic.reshape(3, 1), source_position,
-                                             left_audio, room_dim, fs, 0.99, 0, ray_tracing=False)
-        right_dry = simulate_room_for_channel(right_mic.reshape(3, 1), source_position,
-                                              right_audio, room_dim, fs, 0.99, 0, ray_tracing=False)
-        min_len = min(len(left_dry), len(right_dry))
-        left_dry = left_dry[:min_len]
-        right_dry = right_dry[:min_len]
-        right_dry = stereo_ratio * left_dry + (1 - stereo_ratio) * right_dry
+    rir_l_dry = get_common_rir(left_mic_dry.reshape(3, 1), source_dry, room_dim, fs, 0.99, 0, ray_tracing=False)
+    rir_r_dry = get_common_rir(right_mic_dry.reshape(3, 1), source_dry, room_dim, fs, 0.99, 0, ray_tracing=False)
 
-    dry_stereo = np.vstack([left_dry, right_dry])
+    dry_left = fftconvolve(left_audio, rir_l_dry, mode="full")[:len(left_audio)]
+    dry_right = fftconvolve(right_audio, rir_r_dry, mode="full")[:len(right_audio)]
+    dry_stereo = np.vstack([dry_left, dry_right])
 
-    # --- Optional: Add Noise Floor to Dry Signal ---
-    noise_floor_snr = 50  # dB
-    noise_power_left = np.mean(left_dry**2) * np.power(10, -noise_floor_snr / 10)
-    noise_left = np.random.rand(int(0.5 * fs)) * np.sqrt(noise_power_left)
-    left_dry = np.concatenate([left_dry, noise_left])
-    noise_power_right = np.mean(right_dry**2) * np.power(10, -noise_floor_snr / 10)
-    noise_right = np.random.rand(int(0.5 * fs)) * np.sqrt(noise_power_right)
-    right_dry = np.concatenate([right_dry, noise_right])
-    dry_stereo = np.vstack([left_dry, right_dry])
-
-    # --- Trim both outputs to the same length ---
-    min_len_total = min(reverberant_stereo.shape[1], dry_stereo.shape[1])
-    reverberant_stereo = reverberant_stereo[:, :min_len_total]
-    dry_stereo = dry_stereo[:, :min_len_total]
-
-    return reverberant_stereo, dry_stereo
-
+    # --- Match length ---
+    min_len = min(reverberant_stereo.shape[1], dry_stereo.shape[1])
+    return reverberant_stereo[:, :min_len], dry_stereo[:, :min_len]
 
 
 
@@ -304,84 +249,103 @@ def create_rir_conds(t60, room_dim, min_distance_to_wall, fs, audio_ex):
 
     return lossy_ex, dry_ex
 
-def create_rir_generator_stereo(t60, room_dim, min_distance_to_wall, fs, audio_ex, stereo_offset=0.2):
+def create_rir_generator_stereo(t60, room_dim, min_distance_to_wall, fs, audio_ex):
     """
-    Create stereo reverberant (lossy) and dry audio conditions using RIR-Generator.
+    Create stereo reverberant and dry examples using rir-generator,
+    with a shared RIR applied to both channels for realistic spatial behavior.
 
     Parameters:
-        t60: Reverberation time in seconds.
-        room_dim: A list or tuple with 3 room dimensions (meters).
-        min_distance_to_wall: Minimum distance from the walls (meters).
-        fs: Sampling frequency (Hz).
-        audio_ex: Stereo input audio signal as a NumPy array of shape (samples, 2).
-        stereo_offset: Distance between left and right microphone positions (meters).
-    
+        t60 (float): Reverberation time in seconds.
+        room_dim (tuple): Room dimensions (LxWxH) in meters.
+        min_distance_to_wall (float): Minimum distance of mic and source from walls.
+        fs (int): Sampling rate in Hz.
+        audio_ex (ndarray): Stereo input audio of shape (samples, 2).
+
     Returns:
-        A tuple (lossy_ex, dry_ex) where each is a stereo NumPy array with shape (samples, 2).
+        Tuple (reverberant_stereo, dry_stereo) each of shape (2, N).
     """
-    # Verify that the input is stereo.
     if audio_ex.ndim != 2 or audio_ex.shape[1] != 2:
-        raise ValueError("Input audio must be a stereo signal with shape (samples, 2).")
-    
-    # Sample a base microphone position and a source position uniformly in the room.
-    base_mic = [
+        raise ValueError("Input audio must be stereo with shape (samples, 2)")
+
+    left_audio = audio_ex[:, 0]
+    right_audio = audio_ex[:, 1]
+
+    # --- Shared mic and source positions ---
+    mic_pos = [
         np.random.uniform(min_distance_to_wall, room_dim[n] - min_distance_to_wall)
         for n in range(3)
     ]
-    source_position = [
+    source_pos = [
         np.random.uniform(min_distance_to_wall, room_dim[n] - min_distance_to_wall)
         for n in range(3)
     ]
-    
-    # Create separate microphone positions for left and right channels by offsetting the base position.
-    left_mic = base_mic.copy()
-    right_mic = base_mic.copy()
-    left_mic[0] -= stereo_offset / 2
-    right_mic[0] += stereo_offset / 2
-    
-    # Determine a randomized RIR length within [t60, 2*t60] and cap at 0.5 seconds.
-    rir_length = int(fs * np.random.uniform(t60, t60 * 2))
-    rir_length = min(rir_length, int(fs * 0.5))
-    
-    # Generate impulse responses (RIRs) for each channel using the RIR-Generator's generate() function.
-    left_rir = generate(
-        c=340, fs=fs, r=left_mic, s=source_position,
-        L=room_dim, reverberation_time=t60, nsample=rir_length
-    ).squeeze()
-    assert left_rir.ndim == 1, f"Left RIR must be 1D, but got shape {left_rir.shape}."
-    
-    right_rir = generate(
-        c=340, fs=fs, r=right_mic, s=source_position,
-        L=room_dim, reverberation_time=t60, nsample=rir_length
-    ).squeeze()
-    assert right_rir.ndim == 1, f"Right RIR must be 1D, but got shape {right_rir.shape}."
-    
-    # Apply the RIR to each channel separately.
-    lossy_ex_left = fftconvolve(audio_ex[:, 0], left_rir, mode="full")[:audio_ex.shape[0]]
-    lossy_ex_right = fftconvolve(audio_ex[:, 1], right_rir, mode="full")[:audio_ex.shape[0]]
-    lossy_ex = np.stack((lossy_ex_left, lossy_ex_right), axis=1)
-    
-    # Generate short 'dry' RIRs to simulate anechoic (mostly absorption) conditions.
-    left_dry_rir = generate(
-        c=340, fs=fs, r=left_mic, s=source_position,
-        L=room_dim, reverberation_time=0.3, nsample=int(fs * 0.03)
-    ).squeeze()
-    assert left_dry_rir.ndim == 1, f"Left dry RIR must be 1D, but got shape {left_dry_rir.shape}."
-    
-    right_dry_rir = generate(
-        c=340, fs=fs, r=right_mic, s=source_position,
-        L=room_dim, reverberation_time=0.3, nsample=int(fs * 0.03)
-    ).squeeze()
-    assert right_dry_rir.ndim == 1, f"Right dry RIR must be 1D, but got shape {right_dry_rir.shape}."
-    
-    # Convolve the dry RIRs with the corresponding channels.
-    dry_ex_left = fftconvolve(audio_ex[:, 0], left_dry_rir, mode="full")[:audio_ex.shape[0]]
-    dry_ex_right = fftconvolve(audio_ex[:, 1], right_dry_rir, mode="full")[:audio_ex.shape[0]]
-    dry_ex = np.stack((dry_ex_left, dry_ex_right), axis=1)
-    
-    # Ensure both outputs have equal length (they should, but this is an extra safeguard).
-    min_length = min(lossy_ex.shape[0], dry_ex.shape[0])
-    return lossy_ex[:min_length, :], dry_ex[:min_length, :]
+
+    # --- RIR parameters ---
+    rir_len = min(int(fs * np.random.uniform(t60, 2 * t60)), int(fs * 0.5))
+
+    # --- Reverberant RIR (shared) ---
+    rir_rev = generate(c=340, fs=fs, r=mic_pos, s=source_pos, L=room_dim,
+                       reverberation_time=t60, nsample=rir_len).squeeze()
+
+    rev_left = fftconvolve(left_audio, rir_rev, mode="full")[:len(left_audio)]
+    rev_right = fftconvolve(right_audio, rir_rev, mode="full")[:len(right_audio)]
+    reverberant_stereo = np.vstack([rev_left, rev_right])
+
+    # --- Dry RIR (shared, short, high absorption) ---
+    rir_dry = generate(c=340, fs=fs, r=mic_pos, s=source_pos, L=room_dim,
+                       reverberation_time=0.3, nsample=int(fs * 0.03)).squeeze()
+
+    dry_left = fftconvolve(left_audio, rir_dry, mode="full")[:len(left_audio)]
+    dry_right = fftconvolve(right_audio, rir_dry, mode="full")[:len(right_audio)]
+    dry_stereo = np.vstack([dry_left, dry_right])
+
+    # --- Match lengths ---
+    min_len = min(reverberant_stereo.shape[1], dry_stereo.shape[1])
+    return reverberant_stereo[:, :min_len], dry_stereo[:, :min_len]
+
+
+def create_rir_conds_openair(fs, audio_ex, rir_folder, mix_range=(0.7, 1.0)):
+    """
+    Apply a random stereo OpenAIR RIR to a stereo audio input, with adjustable wet/dry mix.
+
+    Parameters:
+        fs (int): Sample rate (must match RIR)
+        audio_ex (np.ndarray): Stereo input audio, shape (samples, 2)
+        rir_folder (str): Path to processed OpenAIR RIRs (must be stereo, 44.1kHz)
+        mix_range (tuple): Range of alpha (wet signal contribution), e.g., (0.7, 1.0)
+
+    Returns:
+        (reverberant_stereo, dry_stereo)
+    """
+    # Collect all valid .wav RIRs recursively
+    rir_paths = [
+        os.path.join(root, f)
+        for root, _, files in os.walk(rir_folder)
+        for f in files
+        if f.endswith(".wav")
+    ]
+    if not rir_paths:
+        raise ValueError(f"No RIRs found in {rir_folder}")
+
+    # Pick random RIR
+    rir_path = random.choice(rir_paths)
+    rir, rir_sr = sf.read(rir_path)
+    if rir_sr != fs:
+        raise ValueError(f"RIR sample rate {rir_sr} does not match expected {fs}")
+    if rir.ndim != 2 or rir.shape[1] != 2:
+        raise ValueError(f"Expected stereo RIR, got shape {rir.shape}")
+
+    # Convolve both channels
+    rev_left = fftconvolve(audio_ex[:, 0], rir[:, 0], mode="full")[:len(audio_ex)]
+    rev_right = fftconvolve(audio_ex[:, 1], rir[:, 1], mode="full")[:len(audio_ex)]
+    reverb = np.vstack([rev_left, rev_right])
+
+    # Mix dry + reverb
+    alpha = np.random.uniform(*mix_range)
+    dry = np.swapaxes(audio_ex, 0, 1)
+    output = alpha * reverb + (1 - alpha) * dry
+
+    return output, dry
 
 
 
