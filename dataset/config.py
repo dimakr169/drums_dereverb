@@ -5,7 +5,8 @@ Created on Thu Jan  4 14:12:49 2024
 @author: dimak
 """
 
-import tensorflow as tf
+# import tensorflow as tf
+import torch
 
 
 class Config:
@@ -36,14 +37,13 @@ class Config:
         self.aug_factor = 3 # apply augmentations for each slice
 
         # stft
-        self.hop = (
-            #341  # for preventing shape mismatchin in UNet encoding-decoding block
-            #109
-            177
-        )
-        self.win = 510 #1022
+        self.hop = 384
+        self.win = 1024 
         self.fft = self.win
         self.win_fn = "hann"
+
+        # window for ISTFT
+        self.center = True
 
         # training
         self.rep_type = "ri"
@@ -52,16 +52,13 @@ class Config:
         # 'ri_mag_phase': for GaGNet with Real and Imaginary Parts enchanced with magnitude and phase
         # 'ri': for cold diffusion UNet, DCUNet, DCCRN with Real and Imaginary Parts
         self.val_split = 0.2
-        self.batch_size = 4  # 24
+        self.batch_size = 8  # 24
 
-    def window_fn(self):
-        """Return window generator.
-        Returns:
-            Callable, window function of tf.signal
-                , which corresponds to self.win_fn.
-        """
-        mapper = {"hann": tf.signal.hann_window, "hamming": tf.signal.hamming_window}
-        if self.win_fn in mapper:
-            return mapper[self.win_fn]
-
-        raise ValueError("invalid window function: " + self.win_fn)
+    # window factory 
+    def window_tensor(self, device="cpu"):
+        if self.win_fn == "hann":
+            # TF uses periodic=True by default. Match PyTorch periodic=True.
+            return torch.hann_window(self.win, periodic=True, device=device, dtype=torch.float32)
+        elif self.win_fn == "hamming":
+            return torch.hamming_window(self.win, periodic=True, device=device, dtype=torch.float32)
+        raise ValueError(f"invalid window function: {self.win_fn}")

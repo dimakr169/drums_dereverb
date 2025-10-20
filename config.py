@@ -6,7 +6,7 @@ Created on Fri Jan  5 17:01:03 2024
 """
 
 from backbones.config import Config as ModelConfig
-from backbones.noam_scheduler import NoamScheduler
+# from backbones.noam_scheduler import NoamScheduler
 from dataset.config import Config as DataConfig
 
 
@@ -15,8 +15,8 @@ class TrainConfig:
 
     def __init__(self):
         # choose "fixed"  or  "cosine_restart or "warmup_cosine"
-        self.lr_policy     = "warmup_cosine"
-        self.learning_rate = 5e-5        # base LR  (ignored when cosine sets its own)
+        self.lr_policy     = "fixed"
+        self.learning_rate = 1e-4        # base LR  (ignored when cosine sets its own)
         self.warmup_steps  = 2_000          # optional warm‑up inside cosine
         self.restart_epochs = 30            # cosine restart period
         # warmup_cosine
@@ -31,7 +31,7 @@ class TrainConfig:
 
         # global params
         self.diffusions_steps = 16 #10 default
-        self.epochs = 100
+        self.epochs = 200
         self.patience = 10
         self.gen_val_batch = True # generate random val batch after epoch
 
@@ -42,14 +42,14 @@ class TrainConfig:
         # model name
         self.name = "cold_diff_16steps"
 
-    def lr(self):
-        """Generate proper learning rate scheduler."""
-        mapper = {"noam": NoamScheduler}
-        if self.lr_policy == "fixed":
-            return self.learning_rate
-        if self.lr_policy in mapper:
-            return mapper[self.lr_policy](self.learning_rate, **self.lr_params)
-        raise ValueError("invalid lr_policy")
+    # def lr(self):
+    #    """Generate proper learning rate scheduler."""
+    #    mapper = {"noam": NoamScheduler}
+    #    if self.lr_policy == "fixed":
+    #        return self.learning_rate
+    #    if self.lr_policy in mapper:
+    #        return mapper[self.lr_policy](self.learning_rate, **self.lr_params)
+    #    raise ValueError("invalid lr_policy")
 
 
 class Config:

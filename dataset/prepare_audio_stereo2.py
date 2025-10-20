@@ -28,7 +28,7 @@ def load_drum_files(data_dir):
                 drum_files.append(os.path.join(root, file))
     return drum_files
 
-def process_item(file_path, pre_params, anechoic_path, reverb_path):
+def process_item(file_path, pre_params, anechoic_path, reverb_path, rir_folder):
     # Load the audio file
     try:
         audio_ex, sr = sf.read(file_path)
@@ -43,7 +43,9 @@ def process_item(file_path, pre_params, anechoic_path, reverb_path):
         print(f"Error reading file {file_path}: {e}")
         return
 
-    audio_filename = os.path.basename(os.path.dirname(file_path))
+    folder_name = os.path.basename(os.path.dirname(file_path))
+    file_base = os.path.splitext(os.path.basename(file_path))[0]
+    audio_filename = f"{folder_name}__{file_base}"
     duration_samples = int(pre_params.dur * pre_params.sr)
     num_chunks = len(audio_ex) // duration_samples
     audio_chunks = [
@@ -103,7 +105,7 @@ def process_item(file_path, pre_params, anechoic_path, reverb_path):
                     lossy_ex, dry_ex = create_rir_conds_openair(
                         pre_params.sr, 
                         chunk_aug, 
-                        rir_folder="C:\\Users\\dimak\\Desktop\\MyWork\\Kineza_2.0\\DrumsDereverb\\data\\OpenAir_RIRs_stereo", 
+                        rir_folder=rir_folder, 
                         mix_range=(0.0, 1.0)
                     )
 
@@ -128,16 +130,15 @@ def process_item(file_path, pre_params, anechoic_path, reverb_path):
             except Exception as e:
                 print(f"Aborted processing {audio_filename}, chunk {idx}, augmentation {cnt} due to: {e}")
 
-def process_batch(file_paths, pre_params, anechoic_path, reverb_path):
+def process_batch(file_paths, pre_params, anechoic_path, reverb_path, rir_folder):
     for file_path in file_paths:
-        process_item(file_path, pre_params, anechoic_path, reverb_path)
+        process_item(file_path, pre_params, anechoic_path, reverb_path, rir_folder)
 
 def main(args):
     pre_params = Config()
     current_dir = Path.cwd()
-    # data_dir = current_dir.parent / "data/test"
-    data_dir = current_dir.parent / "DrumsDereverb/data/test" 
-    print(data_dir)
+    data_dir = current_dir.parent / "data/gmd_musdb18hq_stereo" 
+    rir_folder = current_dir.parent / "data/OpenAir_RIRs_stereo" 
     drum_files = load_drum_files(data_dir)
     print(f"Found {len(drum_files)} drum files.")
 
@@ -152,7 +153,7 @@ def main(args):
 
     with ProcessPoolExecutor(max_workers=os.cpu_count()) as executor:
         futures = [
-            executor.submit(process_batch, batch, pre_params, anechoic_path, reverb_path)
+            executor.submit(process_batch, batch, pre_params, anechoic_path, reverb_path, rir_folder)
             for batch in batches
         ]
         for future in as_completed(futures):
@@ -162,6 +163,6 @@ def main(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--out-path", default=str(Path.cwd().parent / "data/out_gmd_stereo"), type=str)
+    parser.add_argument("--out-path", default=str(Path.cwd().parent / "data/out_combined_stereo"), type=str)
     args = parser.parse_args()
     main(args)
