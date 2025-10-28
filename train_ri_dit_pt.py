@@ -3,14 +3,21 @@ import numpy as np
 import soundfile as sf
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.utils.tensorboard import SummaryWriter
 from torch.optim.lr_scheduler import CosineAnnealingWarmRestarts, LambdaLR
 
 # --- import your external libraries ---
 from dataset.stereo_dataset import build_dataloaders  # PyTorch DataLoader
 from config import Config
-from backbones.unet_stereo import UNetRI # PyTorch Stereo UNet
+from backbones.dit_stereo import TransformerDiffuser, reinit_projections_orthonormal # PyTorch Stereo DiT
 from backbones.metrics_torch import SISDR, SISDRi, NormalizedMutualInformationLoss, NMILossConfig
+
+
+# --- torch settings ---
+torch.backends.cuda.matmul.allow_tf32 = True
+torch.set_float32_matmul_precision('high')   # or 'medium' for even more speed
+torch.backends.cudnn.benchmark = True        # autotune convs (safe since shapes are stable)
 
 
 # ---- EMA wrapper ----
@@ -18,30 +25,80 @@ class EMAModel:
     def __init__(self, model: nn.Module, decay: float=0.999):
         self.decay = decay
         self.model = model
-        self.shadow = [p.detach().clone() for p in model.parameters() if p.requires_grad]
+        self.shadow = {n: p.detach().clone()
+                       for n, p in model.named_parameters() if p.requires_grad}
         self.backup = None
+
+    @torch.no_grad()
+    def _sync_new_params(self):
+        for n, p in self.model.named_parameters():
+            if p.requires_grad and (n not in self.shadow):
+                self.shadow[n] = p.detach().clone()
+
     @torch.no_grad()
     def update(self):
-        i = 0
-        for p in self.model.parameters():
-            if not p.requires_grad: continue
-            self.shadow[i].mul_(self.decay).add_(p.detach(), alpha=1.0 - self.decay)
-            i += 1
+        self._sync_new_params()
+        for n, p in self.model.named_parameters():
+            if not p.requires_grad: 
+                continue
+            self.shadow[n].mul_(self.decay).add_(p.detach(), alpha=1.0 - self.decay)
+
     @torch.no_grad()
     def apply_shadow(self):
-        self.backup = [p.detach().clone() for p in self.model.parameters() if p.requires_grad]
-        i = 0
-        for p in self.model.parameters():
-            if not p.requires_grad: continue
-            p.data.copy_(self.shadow[i]); i += 1
+        self._sync_new_params()
+        self.backup = {}
+        for n, p in self.model.named_parameters():
+            if not p.requires_grad: 
+                continue
+            self.backup[n] = p.detach().clone()
+            p.data.copy_(self.shadow[n])
+
     @torch.no_grad()
     def restore(self):
-        if self.backup is None: return
-        i = 0
-        for p in self.model.parameters():
-            if not p.requires_grad: continue
-            p.data.copy_(self.backup[i]); i += 1
+        if self.backup is None: 
+            return
+        for n, p in self.model.named_parameters():
+            if not p.requires_grad: 
+                continue
+            p.data.copy_(self.backup[n])
         self.backup = None
+
+    # --- add these two for safe checkpointing ---
+    def state_dict(self):
+        # clone tensors to detach from graph
+        return {n: t.clone() for n, t in self.shadow.items()}
+
+    def load_state_dict(self, state, strict: bool = False):
+        """
+        Supports both dict (new) and list (legacy) formats.
+        If a list is given, it will be matched in the order of named_parameters()
+        filtered by requires_grad.
+        """
+        if isinstance(state, list):
+            # legacy: map list -> current trainable params in order
+            i = 0
+            for n, p in self.model.named_parameters():
+                if not p.requires_grad:
+                    continue
+                if i < len(state):
+                    self.shadow[n] = state[i].detach().clone()
+                    i += 1
+                elif strict:
+                    raise RuntimeError("EMA list shorter than model params.")
+            return
+
+        # new: dict
+        missing = []
+        for n, p in self.model.named_parameters():
+            if not p.requires_grad:
+                continue
+            if n in state:
+                self.shadow[n] = state[n].detach().clone()
+            elif strict:
+                missing.append(n)
+        if strict and missing:
+            raise RuntimeError(f"EMA missing keys: {missing}")
+
 
 # ---- ISTFT helper: (B,4,F,T)->(B,2,T) ----
 def istft_from_ri(ri, n_fft, hop, win_length, window, center: bool, length: int | None):
@@ -65,7 +122,6 @@ def istft_from_ri(ri, n_fft, hop, win_length, window, center: bool, length: int 
                            center=center, length=length)
         out = torch.stack([recL, recR], dim=1)  # (B,2,T)
     return out  # keep as fp32 (good for losses)
-
 
 # ---- alpha schedule: cos^2 in UNet ----
 def make_alpha_bar(diffusion_steps: int, device, kind="poly", power=3.0, beta=5.0, k=8.0):
@@ -164,8 +220,8 @@ def build_scheduler(optimizer, policy: str, base_lr: float, steps_per_epoch: int
     raise ValueError(f"Unknown lr_policy: {policy}")
 
 # ---- Trainer Torch version ----
-class ColdRIUNetTrainer: 
-    def __init__(self, model, pre_params, train_params, dataloaders, output_dir, device="cuda"):
+class ColdDiffTransformerTrainer: 
+    def __init__(self, model, pre_params, train_params, model_params, dataloaders, output_dir, device="cuda"):
         self.model = model.to(device)
         self.pre_params = pre_params
         self.train_params = train_params
@@ -180,17 +236,19 @@ class ColdRIUNetTrainer:
         self.diffusion_steps = train_params.diffusions_steps
         self.diffusion_mode = train_params.diffusion_mode
         self.alpha_mode = train_params.alpha_mode
-        self.residual_mode = train_params.residual_mode
+        self.residual_mode = model_params.residual_prediction
 
         # alpha_bar[0..T]
         self.alpha_bar = make_alpha_bar(self.diffusion_steps, device=self.device, kind=self.alpha_mode)
 
         # optimizer
-        self.optimizer = torch.optim.Adam(
+        self.optimizer = torch.optim.AdamW(
             self.model.parameters(),
             lr=float(train_params.learning_rate),
             betas=(train_params.beta1, train_params.beta2),
             eps=train_params.eps,
+            weight_decay = train_params.weight_decay,
+            fused=True,   # PyTorch 2.9+ on CUDA
         )
 
         # AMP
@@ -233,6 +291,7 @@ class ColdRIUNetTrainer:
             cosine_floor_factor=train_params.cosine_floor_factor,
         )
 
+
     @torch.no_grad()
     def diffusion(self, reverb_ri, clean_ri, noise_level):
         # noise_level a_t in [0,1], shape (B,)
@@ -245,6 +304,7 @@ class ColdRIUNetTrainer:
             return a * clean_ri + (1.0 - torch.sqrt(a)) * reverb_ri
         else:
             raise ValueError(f"Unknown diffusion_mode {self.diffusion_mode}")
+        
 
     def get_signal_from_RI_stft(self, ri_stft):
         # ri_stft: (B,4,F,T) -> (B,2,T)
@@ -255,6 +315,7 @@ class ColdRIUNetTrainer:
         return istft_from_ri(ri_stft, n_fft=n_fft, hop=hop, win_length=win,
                              window=self.window, center=self.center, length=length)
 
+
     def _random_timesteps(self, bsize):
         # Uniform integers in [1, T]
         return torch.randint(low=1, high=self.diffusion_steps+1, size=(bsize,), device=self.device)
@@ -264,7 +325,6 @@ class ColdRIUNetTrainer:
         a_t = self.alpha_bar.index_select(0, t)
         a_tm1 = self.alpha_bar.index_select(0, t-1)
         return a_t, a_tm1
-    
 
     def _step(self, batch, train=True, global_step=0):
         reverb_ri, clean_ri = batch  # from DataLoader: (B,4,F,T)
@@ -280,8 +340,8 @@ class ColdRIUNetTrainer:
 
         self.model.train(train)
         with torch.cuda.amp.autocast(enabled=self.device.startswith("cuda")):
-            if self.residual_mode == "next_delta_norm":
-                # ✅ Normalized velocity v_t = (x_{t-1}-x_t) / g_t,  g_t = a_{t-1}-a_t  (linear mix only)
+            if self.residual_mode:
+                # Normalized velocity v_t = (x_{t-1}-x_t) / g_t,  g_t = a_{t-1}-a_t  (linear mix only)
                 g = (a_tm1 - a_t).clamp_min(1e-6).view(-1,1,1,1)       # (B,1,1,1)
 
                 est_v   = self.model(noised, timesteps)                # v̂_t
@@ -290,23 +350,12 @@ class ColdRIUNetTrainer:
                 # Optional per-t weighting to equalize contribution across t:
                 # w = (g / g.mean()).detach()             # normalize
                 # noise_loss = self.l1(est_v * w, target_v * w) * 35.0
-                noise_loss = self.l1(est_v, target_v) * 35.0
-                # noise_loss = self.l1(est_ri, noised_next) * 50.0
-            elif self.residual_mode == "clean_residual":
-                # r_t = A - x_t ;  x_{t-1} = x_t + s_t * r̂_t, with s_t = (a_{t-1}-a_t)/(1-a_t)  (linear mix)
-                a_t, a_tm1 = self._levels_for(timesteps)
-                s = ((a_tm1 - a_t) / (1.0 - a_t).clamp_min(1e-6)).view(-1,1,1,1)
+                noise_loss = self.l1(est_v, target_v) * 35.0 # non weight
 
-                est_r  = self.model(noised, timesteps)                 # r̂_t
-                est_ri = noised + s * est_r                            # x̂_{t-1}
-                target_r = clean_ri - noised
-                # Optional: weight loss by (1 - a_t) to balance steps
-                # w = (1.0 - a_t).view(-1,1,1,1)
-                # noise_loss = self.l1(est_r * w, target_r * w) * 50.0
-                noise_loss = self.l1(est_r, target_r) * 50.0               
             else:
                 est_ri    = self.model(noised, timesteps)                  # x̂_{t-1}
                 noise_loss = self.l1(est_ri, noised_next) * 50.0
+
 
             # Audio-domain MAE
             est_wav = self.get_signal_from_RI_stft(est_ri)       # (B,2,T)
@@ -352,19 +401,12 @@ class ColdRIUNetTrainer:
         x = inp_ri
         for t in range(self.diffusion_steps, step_stop, -1):
             T = torch.full((bsize,), t, device=self.device, dtype=torch.long)
-            if self.residual_mode == "next_delta_norm":
+            if self.residual_mode:
                 a_t   = self.alpha_bar.index_select(0, T)          # (B,)
                 a_tm1 = self.alpha_bar.index_select(0, T-1)
                 g = (a_tm1 - a_t).clamp_min(1e-6).view(-1,1,1,1)
                 v = self.model(x, T)
                 x = x + g * v
-            elif self.residual_mode == "clean_residual":
-                # s_t = (a_{t-1}-a_t)/(1-a_t)
-                a_t   = self.alpha_bar.index_select(0, T)
-                a_tm1 = self.alpha_bar.index_select(0, T-1)
-                s = ((a_tm1 - a_t) / (1.0 - a_t).clamp_min(1e-6)).view(-1,1,1,1)
-                r = self.model(x, T)  # r̂_t
-                x = x + s * r                
             else:
                 x = self.model(x, T)      # direct x̂_{t-1}
 
@@ -391,7 +433,7 @@ class ColdRIUNetTrainer:
 
         # save first N examples per batch
         sr = getattr(self.pre_params, "sr", 44100)
-        Bsave = min(5, reverb_ri.shape[0])
+        Bsave = min(8, reverb_ri.shape[0])
         for i in range(Bsave):
             val_dir = os.path.join(out_root, f"val_{i}")
             os.makedirs(val_dir, exist_ok=True)
@@ -402,6 +444,7 @@ class ColdRIUNetTrainer:
             for t, pred in enumerate(preds):
                 pred_wav = self.get_signal_from_RI_stft(pred[i:i+1]).squeeze(0).permute(1,0).cpu().numpy()
                 sf.write(os.path.join(val_dir, f"diffused_{t}.wav"), pred_wav, sr)
+
 
     def train(self):
         train_size = len(self.train_loader)
@@ -448,7 +491,7 @@ class ColdRIUNetTrainer:
                     # SI metrics (stubs)
                     self.sisdr.update(out["clean_wav"], out["est_wav"])
                     self.sisdri.update(out["clean_wav"], out["est_wav"], out["inp_wav"]) 
-                    
+
             self.ema.restore()
 
             noise_avg = noise_sum / max(n_batches,1)
@@ -480,7 +523,7 @@ class ColdRIUNetTrainer:
                     "model": self.model.state_dict(),
                     "optimizer": self.optimizer.state_dict(),
                     "scaler": self.scaler.state_dict(),
-                    "ema": [t.clone() for t in self.ema.shadow],
+                    "ema": self.ema.state_dict(),
                     "best_loss": val_loss,
                 }, ckpt_path)
                 print("Checkpoint saved.")
@@ -518,8 +561,8 @@ def main():
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--data-dir", default="data/out_combined_stereo")
-    parser.add_argument("--model-name", default="CDiff_RI_s_1024-384_32ch_delta-res_cos2")
-    parser.add_argument("--gpu", default=1, type=int)
+    parser.add_argument("--model-name", default="CDiff_DiT_s_768d-8h_4l_cos2")
+    parser.add_argument("--gpu", default=0, type=int)
     args = parser.parse_args()
 
     # choose device
@@ -543,7 +586,8 @@ def main():
     dataloaders = (train_loader, val_loader)
 
     # model
-    model = UNetRI(model_params)
+    model = TransformerDiffuser(model_params)
+    reinit_projections_orthonormal(model)  # makes encoder ~orthonormal; decoder ~pseudoinverse
 
     # --- print parameter counts ---
     total_params = sum(p.numel() for p in model.parameters())
@@ -553,8 +597,8 @@ def main():
 
     # trainer
     out_dir = f"saved_models/{args.model_name}"
-    trainer = ColdRIUNetTrainer(model, pre_params, train_params, 
-                                dataloaders, out_dir, device=device)
+    trainer = ColdDiffTransformerTrainer(model, pre_params, train_params, model_params, 
+                                    dataloaders, out_dir, device=device)
     trainer.train()
 
 if __name__ == "__main__":

@@ -185,7 +185,7 @@ def build_dataloaders(config, data_dir, seed: int = 42, num_workers: int = 4, pi
     """
       - Globs reverb/*.<ext>, maps to (reverb, anechoic) pairs
       - Splits train/val
-      - Reproducible worker seeding
+      - reproducible worker seeding
       - Returns DataLoaders
     """
     pattern = os.path.join(data_dir, "reverb", f"*.{config.inp_type}")

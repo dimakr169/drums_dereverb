@@ -3,6 +3,7 @@ import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.utils.checkpoint import checkpoint
 
 # -----------------------------
 # Sinusoidal timestep embeddings
@@ -149,7 +150,8 @@ class UNetRI(nn.Module):
         ch_mult = config.ch_mult
         num_res = len(ch_mult)
         emb_ch = C * 4  # <-- embedding width everywhere
-        self.create_mask = config.create_mask
+        self.residual_prediction = config.residual_prediction
+        self.use_ckpt = config.use_ckpt
 
         # ---- timestep embedding MLP ----
         self.t_embed = nn.Sequential(
@@ -161,7 +163,6 @@ class UNetRI(nn.Module):
         )
 
         # ---- input conv ----
-        # TF used Conv2D(C, (9,1)); in NCHW that's kernel=(9,1), padding=(4,0)
         self.input_conv = nn.Conv2d(config.in_chans, C, kernel_size=(9,1), padding=(4,0))
 
         # ---- down path ----
@@ -222,6 +223,34 @@ class UNetRI(nn.Module):
         self.out_conv1 = nn.Conv2d(C, C, kernel_size=3, padding=1)
         self.out_conv2 = nn.Conv2d(C, out_c, kernel_size=3, padding=1)
 
+        # Learnable output gain:
+        # - residual mode: start from 0 → identity step (x_{t-1} ≈ x_t + 0)
+        # - non-residual:  start from 1 (behaves like standard regression)
+        gain_init = 0.1 if self.residual_prediction else 1.0
+        self.out_gain = nn.Parameter(torch.ones(1, out_c, 1, 1) * gain_init)
+
+        # Zero-init final conv so Δ starts ~0 in residual mode
+        nn.init.zeros_(self.out_conv2.weight)
+        nn.init.zeros_(self.out_conv2.bias)
+
+    # ---- helper: apply a sequence of ResBlocks with optional checkpointing ----
+    def _apply_blocks_with_ckpt(self, blocks, h, temb, ckpt_from: int = 1):
+        """
+        Apply a list of ResNetBlocks.
+        - Do NOT checkpoint the first 'ckpt_from' blocks (often channel-changing).
+        - Checkpoint only blocks with in_ch == out_ch (from index >= ckpt_from).
+        """
+        for idx, b in enumerate(blocks):
+            if self.use_ckpt and self.training and idx >= ckpt_from:
+                # bind 'b' as default arg to avoid late binding
+                def fn(x, t, m=b):
+                    return m(x, t)
+                h = checkpoint(fn, h, temb)
+            else:
+                h = b(h, temb)
+        return h
+
+
     def forward(self, x: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
         """
         x: (B, in_chans=4, F, T)
@@ -234,42 +263,51 @@ class UNetRI(nn.Module):
         # input conv
         h = self.input_conv(x)  # (B, C, F, T)
 
-        # down path
+        # ---- down path ----
         skips = []
-        si = 0
         for i, blocks in enumerate(self.down_res):
-            for block in blocks:
-                h = block(h, temb)
+            # First block may change channels -> don't checkpoint it.
+            h = self._apply_blocks_with_ckpt(blocks, h, temb, ckpt_from=1)
             skips.append(h)
             if i < len(self.down_samp):
                 h = self.down_samp[i](h)
 
-        # middle
+        # ---- middle ----
         for block in self.mid:
             if isinstance(block, ResNetBlock):
-                h = block(h, temb)
+                if self.use_ckpt and self.training:
+                    def fn(x, tt, m=block):
+                        return m(x, tt)
+                    h = checkpoint(fn, h, temb)
+                else:
+                    h = block(h, temb)
             else:
-                h = block(h)  # attention
+                h = block(h)
 
-        # up path
+        # ---- up path ----
         for i, blocks in enumerate(self.up_res):
             if i < len(self.up_samp):
                 h = self.up_samp[i](h)
 
             skip = skips.pop()
-
-            # spatial align if needed
             if skip.shape[-2:] != h.shape[-2:]:
                 h = F.interpolate(h, size=skip.shape[-2:], mode='nearest')
 
-            # 1st block with concat once
+            # First block concatenates skip -> channel change, do NOT checkpoint it.
             h = blocks[0](torch.cat([h, skip], dim=1), temb)
 
-            # remaining blocks without extra concat
+            # Remaining blocks keep channels -> safe to checkpoint
             for b in blocks[1:]:
-                h = b(h, temb)
+                if self.use_ckpt and self.training:
+                    def fn(x, tt, m=b):
+                        return m(x, tt)
+                    h = checkpoint(fn, h, temb)
+                else:
+                    h = b(h, temb)
 
         # output
         h = self.out_conv1(h)
         h = self.out_conv2(h)
-        return torch.sigmoid(h) if self.create_mask else h
+        h = h * self.out_gain
+
+        return h

@@ -3,14 +3,20 @@ import numpy as np
 import soundfile as sf
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.utils.tensorboard import SummaryWriter
 from torch.optim.lr_scheduler import CosineAnnealingWarmRestarts, LambdaLR
 
 # --- import your external libraries ---
 from dataset.stereo_dataset import build_dataloaders  # PyTorch DataLoader
 from config import Config
-from backbones.unet_stereo import UNetRI # PyTorch Stereo UNet
+from backbones.dit_stereo import TransformerDiffuser, reinit_projections_orthonormal # PyTorch Stereo DiT
 from backbones.metrics_torch import SISDR, SISDRi, NormalizedMutualInformationLoss, NMILossConfig
+
+# --- torch settings ---
+torch.backends.cuda.matmul.allow_tf32 = True
+torch.set_float32_matmul_precision('high')   # or 'medium' for even more speed
+torch.backends.cudnn.benchmark = True        # autotune convs (safe since shapes are stable)
 
 
 # ---- EMA wrapper ----
@@ -43,6 +49,7 @@ class EMAModel:
             p.data.copy_(self.backup[i]); i += 1
         self.backup = None
 
+
 # ---- ISTFT helper: (B,4,F,T)->(B,2,T) ----
 def istft_from_ri(ri, n_fft, hop, win_length, window, center: bool, length: int | None):
     # ri: (B,4,F,T) [L_R, L_I, R_R, R_I]
@@ -65,7 +72,6 @@ def istft_from_ri(ri, n_fft, hop, win_length, window, center: bool, length: int 
                            center=center, length=length)
         out = torch.stack([recL, recR], dim=1)  # (B,2,T)
     return out  # keep as fp32 (good for losses)
-
 
 # ---- alpha schedule: cos^2 in UNet ----
 def make_alpha_bar(diffusion_steps: int, device, kind="poly", power=3.0, beta=5.0, k=8.0):
@@ -164,7 +170,7 @@ def build_scheduler(optimizer, policy: str, base_lr: float, steps_per_epoch: int
     raise ValueError(f"Unknown lr_policy: {policy}")
 
 # ---- Trainer Torch version ----
-class ColdRIUNetTrainer: 
+class ColdDiffTransformerTrainer: 
     def __init__(self, model, pre_params, train_params, dataloaders, output_dir, device="cuda"):
         self.model = model.to(device)
         self.pre_params = pre_params
@@ -176,21 +182,26 @@ class ColdRIUNetTrainer:
         os.makedirs(os.path.join(self.output_dir, "samples"), exist_ok=True)
 
         self.device = device
-        # cold diffusion params
         self.diffusion_steps = train_params.diffusions_steps
-        self.diffusion_mode = train_params.diffusion_mode
-        self.alpha_mode = train_params.alpha_mode
-        self.residual_mode = train_params.residual_mode
 
         # alpha_bar[0..T]
-        self.alpha_bar = make_alpha_bar(self.diffusion_steps, device=self.device, kind=self.alpha_mode)
+        # self.alpha_bar = make_alpha_bar(self.diffusion_steps, device=self.device, kind="poly", power=3.0)
+        self.alpha_bar = make_alpha_bar(self.diffusion_steps, device=self.device, kind="cos2")
+
+        # --- importance CDF over timesteps based on schedule step size. DiT only
+        with torch.no_grad():
+            step = (self.alpha_bar[:-1] - self.alpha_bar[1:]).abs()  # size T
+            probs = (step / step.sum()).clamp_min(1e-12)
+            self._t_cdf = probs.cumsum(0)  # (T,)
 
         # optimizer
-        self.optimizer = torch.optim.Adam(
+        self.optimizer = torch.optim.AdamW(
             self.model.parameters(),
             lr=float(train_params.learning_rate),
             betas=(train_params.beta1, train_params.beta2),
             eps=train_params.eps,
+            weight_decay = train_params.weight_decay,
+            fused=True,   # PyTorch 2.9+ on CUDA
         )
 
         # AMP
@@ -202,7 +213,7 @@ class ColdRIUNetTrainer:
         # losses & metrics
         self.l1 = nn.L1Loss()
         self.nmi_loss = NormalizedMutualInformationLoss(NMILossConfig(
-            bins=384,
+            bins=512,
             window_length=1024,
             hop_length=384,
             use_db_scale=False,
@@ -234,17 +245,10 @@ class ColdRIUNetTrainer:
         )
 
     @torch.no_grad()
-    def diffusion(self, reverb_ri, clean_ri, noise_level):
-        # noise_level a_t in [0,1], shape (B,)
-        a = noise_level.view(-1, 1, 1, 1)
-        if self.diffusion_mode == "linear":
-            return a * clean_ri + (1.0 - a) * reverb_ri
-        elif self.diffusion_mode == "sqrt_pair":
-            return torch.sqrt(a) * clean_ri + torch.sqrt(1.0 - a) * reverb_ri
-        elif self.diffusion_mode == "sqrt_aggresive":
-            return a * clean_ri + (1.0 - torch.sqrt(a)) * reverb_ri
-        else:
-            raise ValueError(f"Unknown diffusion_mode {self.diffusion_mode}")
+    def diffusion(self, reverb_ri, clean_ri, a):
+        # a in [0,1], a=1 -> clean, a=0 -> reverb
+        a = a.view(-1, 1, 1, 1)
+        return a * clean_ri + (1.0 - a) * reverb_ri
 
     def get_signal_from_RI_stft(self, ri_stft):
         # ri_stft: (B,4,F,T) -> (B,2,T)
@@ -255,6 +259,13 @@ class ColdRIUNetTrainer:
         return istft_from_ri(ri_stft, n_fft=n_fft, hop=hop, win_length=win,
                              window=self.window, center=self.center, length=length)
 
+    def _sample_timesteps_importance(self, bsize):
+        # inverse-CDF sampling
+        u = torch.rand(bsize, device=self.device)
+        idx = torch.searchsorted(self._t_cdf, u)
+        # idx ∈ [0, T-1] corresponds to t ∈ [1..T]
+        return (idx + 1).clamp_(1, self.diffusion_steps)
+
     def _random_timesteps(self, bsize):
         # Uniform integers in [1, T]
         return torch.randint(low=1, high=self.diffusion_steps+1, size=(bsize,), device=self.device)
@@ -264,7 +275,6 @@ class ColdRIUNetTrainer:
         a_t = self.alpha_bar.index_select(0, t)
         a_tm1 = self.alpha_bar.index_select(0, t-1)
         return a_t, a_tm1
-    
 
     def _step(self, batch, train=True, global_step=0):
         reverb_ri, clean_ri = batch  # from DataLoader: (B,4,F,T)
@@ -272,41 +282,43 @@ class ColdRIUNetTrainer:
         clean_ri  = clean_ri.to(self.device, non_blocking=True)
 
         bsize = reverb_ri.shape[0]
-        timesteps = self._random_timesteps(bsize)  # (B,)
+        timesteps = self._random_timesteps(bsize)  # (B,) # sample t uniformly
+        # timesteps = self._sample_timesteps_importance(bsize) # sample t non-uniformly
         a_t, a_tm1 = self._levels_for(timesteps)
+        step = (a_tm1 - a_t).view(-1,1,1,1)              # signed, >0
 
-        noised      = self.diffusion(reverb_ri, clean_ri, a_t)
+        noised = self.diffusion(reverb_ri, clean_ri, a_t)
         noised_next = self.diffusion(reverb_ri, clean_ri, a_tm1)
+
+        # Stationary residual target (time-invariant)
+        D_true = clean_ri - reverb_ri                     # (B,4,F,T)
+
+        oracle_tm1 = noised + D_true * step                 # ideal previous state under cold interpolation
+
+        with torch.no_grad():
+            # RI domain check
+            l1_ri_oracle = F.l1_loss(oracle_tm1, noised_next)
+            # audio-domain check
+            wav_or = self.get_signal_from_RI_stft(oracle_tm1)
+            wav_gt = self.get_signal_from_RI_stft(noised_next)
+            l1_wav_oracle = F.l1_loss(wav_or, wav_gt)
+
+        # Log once per N steps (or print)
+        if train and (global_step % 200 == 0):
+            print(f"[ORACLE] RI-L1 {l1_ri_oracle.item():.4f} | WAV-L1 {l1_wav_oracle.item():.4f}")
+            self.tb_train.add_scalar("debug/oracle_ri_l1",  l1_ri_oracle.item(), global_step)
+            self.tb_train.add_scalar("debug/oracle_wav_l1", l1_wav_oracle.item(), global_step)
 
         self.model.train(train)
         with torch.cuda.amp.autocast(enabled=self.device.startswith("cuda")):
-            if self.residual_mode == "next_delta_norm":
-                # ✅ Normalized velocity v_t = (x_{t-1}-x_t) / g_t,  g_t = a_{t-1}-a_t  (linear mix only)
-                g = (a_tm1 - a_t).clamp_min(1e-6).view(-1,1,1,1)       # (B,1,1,1)
+            D_pred = self.model(noised, timesteps)         # predict (A-R) in RI
 
-                est_v   = self.model(noised, timesteps)                # v̂_t
-                est_ri  = noised + g * est_v                           # x̂_{t-1}
-                target_v = (noised_next - noised) / g
-                # Optional per-t weighting to equalize contribution across t:
-                # w = (g / g.mean()).detach()             # normalize
-                # noise_loss = self.l1(est_v * w, target_v * w) * 35.0
-                noise_loss = self.l1(est_v, target_v) * 35.0
-                # noise_loss = self.l1(est_ri, noised_next) * 50.0
-            elif self.residual_mode == "clean_residual":
-                # r_t = A - x_t ;  x_{t-1} = x_t + s_t * r̂_t, with s_t = (a_{t-1}-a_t)/(1-a_t)  (linear mix)
-                a_t, a_tm1 = self._levels_for(timesteps)
-                s = ((a_tm1 - a_t) / (1.0 - a_t).clamp_min(1e-6)).view(-1,1,1,1)
+            # Bound the step so iSTFT doesn't explode while learning
+            step_update = torch.tanh(D_pred) * step      # (B,4,F,T)
+            est_ri = noised + step_update                   # predicted x_{t-1}
+            ri_res_loss  = self.l1(D_pred, D_true) * 20 # Direct supervision on stationary residual
 
-                est_r  = self.model(noised, timesteps)                 # r̂_t
-                est_ri = noised + s * est_r                            # x̂_{t-1}
-                target_r = clean_ri - noised
-                # Optional: weight loss by (1 - a_t) to balance steps
-                # w = (1.0 - a_t).view(-1,1,1,1)
-                # noise_loss = self.l1(est_r * w, target_r * w) * 50.0
-                noise_loss = self.l1(est_r, target_r) * 50.0               
-            else:
-                est_ri    = self.model(noised, timesteps)                  # x̂_{t-1}
-                noise_loss = self.l1(est_ri, noised_next) * 50.0
+            noise_loss = ri_res_loss + self.l1(est_ri, noised_next) * 30.0 #from 50
 
             # Audio-domain MAE
             est_wav = self.get_signal_from_RI_stft(est_ri)       # (B,2,T)
@@ -322,6 +334,19 @@ class ColdRIUNetTrainer:
             self.optimizer.zero_grad(set_to_none=True)
             self.scaler.scale(loss).backward()
             torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)  # optional
+
+            if train and (global_step % 200 == 0):
+                # pick representative layers
+                for name, p in list(self.model.named_parameters()):
+                    if p.grad is not None and any(k in name for k in ["qkv", "ffn_up", "ffn_dn", "proj", "patch_unembed.proj"]):
+                        g = p.grad.detach()
+                        self.tb_train.add_scalar(f"grads/{name}_l2", g.norm().item(), global_step)
+                        break  # don't flood
+                # also log model output energy
+                with torch.no_grad():
+                    pred_dbg = self.model(noised, timesteps)  # whatever your current head returns
+                    self.tb_train.add_scalar("debug/pred_rms", pred_dbg.pow(2).mean().sqrt().item(), global_step)
+
             self.scaler.step(self.optimizer)
             self.scaler.update()
             self.ema.update()
@@ -352,22 +377,12 @@ class ColdRIUNetTrainer:
         x = inp_ri
         for t in range(self.diffusion_steps, step_stop, -1):
             T = torch.full((bsize,), t, device=self.device, dtype=torch.long)
-            if self.residual_mode == "next_delta_norm":
-                a_t   = self.alpha_bar.index_select(0, T)          # (B,)
-                a_tm1 = self.alpha_bar.index_select(0, T-1)
-                g = (a_tm1 - a_t).clamp_min(1e-6).view(-1,1,1,1)
-                v = self.model(x, T)
-                x = x + g * v
-            elif self.residual_mode == "clean_residual":
-                # s_t = (a_{t-1}-a_t)/(1-a_t)
-                a_t   = self.alpha_bar.index_select(0, T)
-                a_tm1 = self.alpha_bar.index_select(0, T-1)
-                s = ((a_tm1 - a_t) / (1.0 - a_t).clamp_min(1e-6)).view(-1,1,1,1)
-                r = self.model(x, T)  # r̂_t
-                x = x + s * r                
-            else:
-                x = self.model(x, T)      # direct x̂_{t-1}
-
+            a_t   = self.alpha_bar.index_select(0, T)
+            a_tm1 = self.alpha_bar.index_select(0, T-1)
+            step  = (a_tm1 - a_t).view(-1,1,1,1)
+            D_pred = self.model(x, T)
+            x = x + torch.tanh(D_pred) * step             # bounded update
+            
             xs.append(x)
         return xs  # list of (B,4,F,T)
 
@@ -391,7 +406,7 @@ class ColdRIUNetTrainer:
 
         # save first N examples per batch
         sr = getattr(self.pre_params, "sr", 44100)
-        Bsave = min(5, reverb_ri.shape[0])
+        Bsave = min(8, reverb_ri.shape[0])
         for i in range(Bsave):
             val_dir = os.path.join(out_root, f"val_{i}")
             os.makedirs(val_dir, exist_ok=True)
@@ -403,10 +418,81 @@ class ColdRIUNetTrainer:
                 pred_wav = self.get_signal_from_RI_stft(pred[i:i+1]).squeeze(0).permute(1,0).cpu().numpy()
                 sf.write(os.path.join(val_dir, f"diffused_{t}.wav"), pred_wav, sr)
 
+    @torch.no_grad()
+    def preview_one_step(self):
+        # Grab a batch
+        try:
+            batch = next(iter(self.val_loader))
+        except StopIteration:
+            return
+
+        reverb_ri, clean_ri = [b.to(self.device) for b in batch]
+
+        # how many examples to preview
+        b = min(2, reverb_ri.shape[0])  # set to 1 or 2 as you like
+
+        # pick a mid timestep (e.g., 60% of the chain)
+        t_val = int(0.6 * self.diffusion_steps)
+        t = torch.full((b,), t_val, device=self.device, dtype=torch.long)
+
+        a_t, a_tm1 = self._levels_for(t)
+        x_t   = self.diffusion(reverb_ri[:b], clean_ri[:b], a_t)
+        x_tm1 = self.diffusion(reverb_ri[:b], clean_ri[:b], a_tm1)
+
+        # use EMA weights for preview
+        self.ema.apply_shadow()
+        self.model.eval()
+        delta = self.model(x_t, t)      # Δ_t = x_{t-1} - x_t
+        self.ema.restore()
+
+        x_hat_tm1 = x_t + delta          # predicted previous state
+
+        sr = getattr(self.pre_params, "sr", 44100)
+        out_root = os.path.join(self.output_dir, "samples", f"preview_t{t_val}")
+        os.makedirs(out_root, exist_ok=True)
+
+        # save each item separately
+        def _write_pair(tag, tens, idx):
+            # tens: (B,4,F,T) -> wav: (T,2)
+            wav_bt = self.get_signal_from_RI_stft(tens[idx:idx+1])  # (1,2,T)
+            wav = wav_bt[0].permute(1, 0).contiguous().cpu().numpy()  # (T,2)
+            sf.write(os.path.join(out_root, f"{tag}_{idx}.wav"), wav, sr)
+
+        for i in range(b):
+            _write_pair("x_t",    x_t,       i)
+            _write_pair("x_tm1",  x_tm1,     i)
+            _write_pair("pred",   x_hat_tm1, i)
+
     def train(self):
         train_size = len(self.train_loader)
         val_size   = len(self.val_loader)
         print(f"Dataset with {train_size} training and {val_size} validation batches")
+
+        # ────────────────────────────────
+        # PATCH ROUND-TRIP DEBUG CHECK
+        # ────────────────────────────────
+        print("Running patch round-trip identity test ...")
+        first_batch = next(iter(self.train_loader))
+        reverb_ri, _ = first_batch
+        reverb_ri = reverb_ri.to(self.device)
+
+        with torch.no_grad():
+            tokens, grid = self.model.patch_embed(reverb_ri)
+            rec = self.model.patch_unembed(tokens, grid)
+
+            # crop/pad to match input (like in forward)
+            rec = rec[..., :reverb_ri.shape[-2], :reverb_ri.shape[-1]]
+            if rec.shape[-2:] != reverb_ri.shape[-2:]:
+                pad_f = max(0, reverb_ri.shape[-2] - rec.shape[-2])
+                pad_t = max(0, reverb_ri.shape[-1] - rec.shape[-1])
+                if pad_f or pad_t:
+                    rec = F.pad(rec, (0, pad_t, 0, pad_f))
+                rec = rec[..., :reverb_ri.shape[-2], :reverb_ri.shape[-1]]
+
+            l1_roundtrip = F.l1_loss(rec, reverb_ri).item()
+            print(f"[PATCH RT] L1(rec, input) = {l1_roundtrip:.6f}")
+
+        # Continue training as normal
 
         patience = 0
         best_loss = float("inf")
@@ -421,7 +507,7 @@ class ColdRIUNetTrainer:
 
             for b, batch in enumerate(self.train_loader):
                 out = self._step(batch, train=True, global_step=gstep)
-                if (b % 300) == 0:
+                if (b % 100) == 0:
                     print(f"Batch {b:5d} | Noise {out['noise'].item():.4f} "
                         f"| NMI {out['nmi'].item():.4f} | Audio {out['audio'].item():.4f} ")
                 # TB per-step
@@ -448,7 +534,7 @@ class ColdRIUNetTrainer:
                     # SI metrics (stubs)
                     self.sisdr.update(out["clean_wav"], out["est_wav"])
                     self.sisdri.update(out["clean_wav"], out["est_wav"], out["inp_wav"]) 
-                    
+
             self.ema.restore()
 
             noise_avg = noise_sum / max(n_batches,1)
@@ -489,6 +575,7 @@ class ColdRIUNetTrainer:
 
                 if self.train_params.gen_val_batch:
                     self.generate_random_batch(epoch)
+                    self.preview_one_step()
             else:
                 print("No validation loss improvement.")
                 patience += 1
@@ -512,14 +599,33 @@ def set_global_seed(seed=42, deterministic=True):
         torch.backends.cudnn.benchmark = False
 
 
+def debug_unfold_fold_identity(x, pf, pt, ts):
+    B, C, Freq, Time = x.shape
+    unfold = torch.nn.Unfold(kernel_size=(pf, pt), stride=(pf, ts)).to(x.device)
+    cols = unfold(x)                             # (B, C*pf*pt, L)
+    out = F.fold(cols, output_size=((Freq // pf) * pf, ( ( (Time - pt)//ts ) + 1 - 1)*ts + pt),
+                 kernel_size=(pf, pt), stride=(pf, ts))
+    # average overlaps (time)
+    ones = torch.ones_like(cols)
+    denom = F.fold(ones, output_size=out.shape[-2:], kernel_size=(pf, pt), stride=(pf, ts)).clamp_min(1e-8)
+    out = out / denom
+    # crop/pad to match input shape
+    out = out[..., :Freq, :Time]
+    if out.shape[-2:] != (Freq, Time):
+        pad_f = max(0, Freq - out.shape[-2]); pad_t = max(0, Time - out.shape[-1])
+        if pad_f or pad_t: out = F.pad(out, (0, pad_t, 0, pad_f))
+        out = out[..., :Freq, :Time]
+    return torch.mean((out - x).abs()).item()
+
+
 # ---- CLI entry point (GPU selection etc.) ----
 def main():
     set_global_seed(42, deterministic=False)
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--data-dir", default="data/out_combined_stereo")
-    parser.add_argument("--model-name", default="CDiff_RI_s_1024-384_32ch_delta-res_cos2")
-    parser.add_argument("--gpu", default=1, type=int)
+    parser.add_argument("--model-name", default="CDiff_DiT_s_320d-10h_12l")
+    parser.add_argument("--gpu", default=0, type=int)
     args = parser.parse_args()
 
     # choose device
@@ -542,8 +648,33 @@ def main():
     train_loader, val_loader = build_dataloaders(pre_params, args.data_dir)
     dataloaders = (train_loader, val_loader)
 
+
     # model
-    model = UNetRI(model_params)
+    model = TransformerDiffuser(model_params)
+
+    reinit_projections_orthonormal(model)
+
+    # Call once
+    with torch.no_grad():
+        batch = next(iter(train_loader))
+        reverb_ri, _ = batch
+        reverb_ri = reverb_ri.to(device)
+        l1_unfold_fold = debug_unfold_fold_identity(reverb_ri, model.cfg.patch_f, model.cfg.patch_t, model.cfg.time_stride)
+        print(f"[UNFOLD/FOLD] L1(rec, input) = {l1_unfold_fold:.6f}")
+
+    # after creating model with the new dims
+    #patch_vec = 4 * model.cfg.patch_f * model.cfg.patch_t  # 836
+    #D = model.cfg.embed_dim                                 # 768
+
+    # Recreate linears to match dims if needed, then:
+    #with torch.no_grad():
+    #    Q,_ = torch.linalg.qr(torch.randn(patch_vec, D, device=model.patch_embed.proj.weight.device))
+    #    model.patch_embed.proj.weight.copy_(Q.T)    # [D, 836]
+    #    model.patch_embed.proj.bias.zero_()
+    #    pinv = torch.linalg.pinv(Q.T)               # [836, D]
+    #    model.patch_unembed.proj.weight.copy_(pinv.T)
+    #    model.patch_unembed.proj.bias.zero_()
+ 
 
     # --- print parameter counts ---
     total_params = sum(p.numel() for p in model.parameters())
@@ -553,9 +684,36 @@ def main():
 
     # trainer
     out_dir = f"saved_models/{args.model_name}"
-    trainer = ColdRIUNetTrainer(model, pre_params, train_params, 
-                                dataloaders, out_dir, device=device)
-    trainer.train()
+    trainer = ColdDiffTransformerTrainer(model, pre_params, train_params, dataloaders, out_dir, device=device)
+    # trainer.train()
+
+
+    # ---- ONE-BATCH α-TEST ----
+  
+
+
+    opt = torch.optim.AdamW(filter(lambda p: p.requires_grad, trainer.model.parameters()), lr=3e-4)
+    batch = next(iter(trainer.train_loader))
+    reverb_ri, clean_ri = [b.to(trainer.device) for b in batch]
+
+    t_val = int(0.6 * trainer.diffusion_steps)
+    t = torch.full((reverb_ri.shape[0],), t_val, device=trainer.device, dtype=torch.long)
+    a_t, a_tm1 = trainer._levels_for(t)
+    x_t   = trainer.diffusion(reverb_ri, clean_ri, a_t).detach()
+    x_tm1 = trainer.diffusion(reverb_ri, clean_ri, a_tm1).detach()
+
+    def wav(ri): return trainer.get_signal_from_RI_stft(ri)
+
+    for step in range(3000):
+        opt.zero_grad(set_to_none=True)
+        pred = trainer.model(x_t, t)             # returns x + out_gain * unembed(embed(x))
+        loss_ri = F.l1_loss(pred, x_tm1) * 30.0
+        loss_w  = F.l1_loss(wav(pred), wav(x_tm1)) * 100.0
+        loss = loss_ri + loss_w
+        loss.backward()
+        opt.step()
+        if step % 50 == 0:
+            print(f"[att-ffn] step {step:03d} | RI {loss_ri.item():.4f} | Aud {loss_w.item():.4f}")
 
 if __name__ == "__main__":
     main()

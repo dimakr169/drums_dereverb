@@ -11,40 +11,34 @@ class Config:
 
     def __init__(self):
 
+        """Common for all backbones"""
+        self.in_chans = 4          # stereo RI: [L_R, L_I, R_R, R_I]
+        self.dropout = 0.1  # Default: 0.2
+        self.continuous_emb = False  # select if time embedding is continuous or discrete
+        self.use_ckpt = True # enable gradient checkpointing inside backbones (VRAM saver)
+        self.residual_prediction = False #predicting the delta Δ = x_{t-1} - x_t 
+                         #usually optimizes better than predicting the absolute x_{t-1}
+
         """UNet (Cold Diffusion)"""
         self.num_res_blocks = 2  # Default: 2
         self.use_attention = False  # Apply attention globally (True or False)
         self.channels = 32  # Default: 16
         self.ch_mult = (1, 2, 4, 4)  # Default: (1, 2, 4, 8, 16, 32, 64)
-        self.dropout = 0.1  # Default: 0.2
         self.ri_inp = True  # if input is Real/Imaginary (True) or Magnintude (False)
         self.use_norm = True  # Usage of BN or GN layers in Residual blocks
         self.num_groups = 4  # or 8 if out_ch%8==0 else 4
         self.resample_with_conv = True  # Dowsampling with conv2d
-        self.create_mask = False  # wether to create a mask to apply for othe input
-        self.continuous_emb = False  # select if time embedding is continuous or discrete
-        self.in_chans = 4          # stereo RI: [L_R, L_I, R_R, R_I]
 
-        """GaGNet (Predictive)"""
-        self.cin = 2  # number of inputs. 2 for Real and Imaginary
-        self.k1 = (2, 3)  # k1: kernel size of 2-D GLU, (2, 3) by default
-        self.k2 = (1, 3)  # k2: kernel size of the UNet-block, (1, 3) by default
-        self.c = 24  # c: channels of the 2-D Convs, 64 by default
-        self.kd1 = (
-            3  # kd1: kernel size of the dilated convs in the squeezedTCM, 3 by default
-        )
-        self.cd1 = (
-            24  # cd1: channels of the dilated convs in the squeezedTCM, 64 by default
-        )
-        self.d_feat = 64  # d_feat: channels in the regular 1-D convs, 256 by default
-        self.p = 1  # p: number of SqueezedTCMs within a group, 2 by default
-        self.q = 2  # q: number of GGMs, 3 by default
-        self.dilas = [1, 2, 5, 9]  # dilas: dilation rates, [1, 2, 5, 9] by default
-        self.is_u2 = True  # is_u2: whether U^{2} Encoder is set, True by default
-        self.is_causal = True  # is_causal: whether causal setting, True by default
-        self.is_squeezed = False  # is_squeezed: whether to squeeze the complex residual modeling path, False by default
-        self.acti_type = (
-            "sigmoid"  # the activation type in the glance block, "sigmoid" by default
-        )
-        self.intra_connect = "cat"  # intra_connect: skip-connection type within the UNet-block , "cat" by default
-        self.norm_type = "IN"  # norm_type: "IN" by default or 'BN'
+
+
+        """TransformerDiffuser (Cold Diffusion)"""
+        self.embed_dim = 768
+        self.num_heads = 8
+        self.num_layers = 4
+        self.max_freq = 1000.0 # use if continuous_emb = True
+        self.use_checkpoint = False # Faster training per step but Higher memory footprint. Set True for big DiTs
+        self.patch_f = 19 #27
+        self.patch_t = 11 #23
+        self.time_stride = 6 # set to 8 for 50% overlap in time if you want fewer artifacts
+        self.pos_embed = "sincos_2d" # ignored when use_rope=True
+        self.use_rope = False    # set True to enable RotaryEmbedding (1D over tokens)
