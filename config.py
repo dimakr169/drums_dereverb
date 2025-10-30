@@ -24,17 +24,17 @@ class TrainConfig:
         self.warmup_epochs = 3
         self.cosine_floor_factor = 1e-2
         # Adam hyper‑params
-        self.ema_decay = 0.999
+        self.ema_decay = 0.9
         self.beta1 = 0.9
         self.beta2 = 0.98 # 0.99 for UNet
         self.eps   = 1e-8 # 1e-9
         self.weight_decay = 0.0
 
         # cold diffusion params
-        self.diffusions_steps = 16 #10 default
+        self.diffusions_steps = 16  #10 default
         self.diffusion_mode = 'linear' # linear, sqrt_pair, sqrt_aggresive
         self.alpha_mode = 'cos2' # poly, cos2, exp, sigmoid
-        self.residual_mode  = 'next_delta_norm'  #next_delta_norm, clean_residual or none (direct spec generation)
+        self.residual_mode  = 'False'  #next_delta_norm, clean_residual or none (direct spec generation)
 
         
         # global params

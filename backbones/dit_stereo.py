@@ -38,12 +38,17 @@ class DiffusionTimeEmbedding(nn.Module):
         self.mlp = nn.Sequential(
             nn.Linear(dim, dim), nn.SiLU(), nn.Linear(dim, dim)
         )
+
+        # Per-t learnable step scale s(t)
+        self.scale_head = nn.Sequential(nn.SiLU(), nn.Linear(dim, 1))
+        nn.init.zeros_(self.scale_head[-1].weight); nn.init.zeros_(self.scale_head[-1].bias)
+
     def forward(self, t: torch.Tensor) -> torch.Tensor:
-        if self.use_sine:
-            emb = _sine_timestep_embedding(t, self.dim, self.max_freq)
-        else:
-            emb = _ddpm_timestep_embedding(t, self.dim)
-        return self.mlp(emb)
+        base = _sine_timestep_embedding(t, self.dim, self.max_freq) if self.use_sine else _ddpm_timestep_embedding(t, self.dim)
+        emb = self.mlp(base)                      # (B,D)
+        s   = torch.sigmoid(self.scale_head(emb)) # (B,1) in (0,1)
+
+        return emb, s
 
 
 # =============================================================
@@ -262,24 +267,31 @@ class RelPosBias2D(nn.Module):
         return b * scale
 
 class CrossAttention(nn.Module):
-    def __init__(self, embed_dim, num_heads):
+    def __init__(self, embed_dim: int, num_heads: int):
         super().__init__()
-        self.h = num_heads; self.d = embed_dim; self.dh = embed_dim // num_heads
+        self.h = num_heads
+        self.d = embed_dim
+        self.dh = embed_dim // num_heads
         self.q = nn.Linear(embed_dim, embed_dim)
-        self.kv = nn.Linear(embed_dim, 2*embed_dim)
+        self.kv = nn.Linear(embed_dim, 2 * embed_dim)
         self.proj = nn.Linear(embed_dim, embed_dim)
+        # inits: let the output start as zero (identity-through-residual)
         nn.init.xavier_uniform_(self.q.weight);  nn.init.zeros_(self.q.bias)
         nn.init.xavier_uniform_(self.kv.weight); nn.init.zeros_(self.kv.bias)
-        nn.init.zeros_(self.proj.weight);        nn.init.zeros_(self.proj.bias)  # start off
+        nn.init.zeros_(self.proj.weight);        nn.init.zeros_(self.proj.bias)
 
     def forward(self, x, cond):
+        # x: (B,N,D) -> Q ; cond: (B,M,D) -> K,V
         B, N, D = x.shape
-        q = self.q(x).reshape(B, N, self.h, self.dh).permute(0,2,1,3)     # (B,h,N,dh)
-        kv = self.kv(cond).reshape(B, cond.size(1), 2, self.h, self.dh).permute(2,0,3,1,4)
-        k, v = kv[0], kv[1]  # (B,h,Nc,dh)
-        q = q.reshape(B*self.h, N, self.dh); k = k.reshape(B*self.h, -1, self.dh); v = v.reshape(B*self.h, -1, self.dh)
+        M = cond.shape[1]
+        q = self.q(x).view(B, N, self.h, self.dh).permute(0,2,1,3)               # (B,h,N,dh)
+        kv = self.kv(cond).view(B, M, 2, self.h, self.dh).permute(2,0,3,1,4)     # (2,B,h,M,dh)
+        k, v = kv[0], kv[1]                                                      # (B,h,M,dh)
+        q = q.reshape(B*self.h, N, self.dh)
+        k = k.reshape(B*self.h, M, self.dh)
+        v = v.reshape(B*self.h, M, self.dh)
         y = F.scaled_dot_product_attention(q, k, v, dropout_p=0.0, is_causal=False)
-        y = y.reshape(B, self.h, N, self.dh).permute(0,2,1,3).contiguous().reshape(B, N, D)
+        y = y.reshape(B, self.h, N, self.dh).permute(0,2,1,3).contiguous().view(B, N, D)
         return self.proj(y)
 
 
@@ -287,138 +299,61 @@ class CrossAttention(nn.Module):
 # Conditional Transformer block with AdaLN-style conditioning
 # =============================================================
 class TransformerBlockCond(nn.Module):
-    def __init__(self, embed_dim, num_heads, dropout=0.0, use_rope=False, Fp_hint=27, Tp_hint=74):
+    def __init__(self, embed_dim: int, num_heads: int, dropout: float=0.0, use_rope: bool=False):
         super().__init__()
         self.norm1 = nn.LayerNorm(embed_dim)
         self.attn  = SDPAttention(embed_dim, num_heads)
         self.norm2 = nn.LayerNorm(embed_dim)
+        self.ffn_up = nn.Linear(embed_dim, 8 * embed_dim)
+        self.ffn_dn = nn.Linear(4 * embed_dim,  embed_dim)
 
-        # Cross attention
-        self.xattn = CrossAttention(embed_dim, num_heads)  # new
-
-        # GEGLU FFN
-        self.ffn_up = nn.Linear(embed_dim, 8 * embed_dim)   # 2 * 4D
-        self.ffn_dn = nn.Linear(4 * embed_dim, embed_dim)
-
-        # NEW: local mixing in TF grid — depthwise separable conv
-        self.Fp_hint, self.Tp_hint = Fp_hint, Tp_hint
-        self.dwconv = nn.Conv2d(embed_dim, embed_dim, kernel_size=3, padding=1, groups=embed_dim, bias=True)
-        nn.init.zeros_(self.dwconv.weight); nn.init.zeros_(self.dwconv.bias)  # identity at init
-
-        # (shift, scale, gate) per branch; last linear zero-init
-        def zero_linear(in_f, out_f):
-            lin = nn.Linear(in_f, out_f)
-            nn.init.zeros_(lin.weight); nn.init.zeros_(lin.bias)
-            return lin
-
-        self.cond1 = nn.Sequential(nn.SiLU(), zero_linear(embed_dim, 3 * embed_dim))  # Attn
-        self.cond2 = nn.Sequential(nn.SiLU(), zero_linear(embed_dim, 3 * embed_dim))  # FFN
-
-        # Stronger starting gates → network does *something* from step 1
-        with torch.no_grad():
-            for cond in (self.cond1[-1], self.cond2[-1]):
-                D = embed_dim
-                cond.bias[2*D:3*D].fill_(0.5)  # was  0.10
-
-        # Residual scaling helps deeper stacks stabilize
-        self.res_scale = 1.0 / (2 ** 0.5)   # instead of 1/sqrt(num_heads)
-
-        self.use_rope = use_rope
-        self.rope = RotaryEmbedding(embed_dim // num_heads) if use_rope else None
-
-        # >>> keep your adaLN _init_, but also zero the residual readouts:
+        # zero-init residual readouts (AdaLN-zero style)
         nn.init.zeros_(self.attn.proj.weight); nn.init.zeros_(self.attn.proj.bias)
         nn.init.zeros_(self.ffn_dn.weight);    nn.init.zeros_(self.ffn_dn.bias)
 
-        self._init_block()
+        # time-cond MLPs (as you already have)
+        def zero_linear(i,o):
+            lin = nn.Linear(i,o); nn.init.zeros_(lin.weight); nn.init.zeros_(lin.bias); return lin
+        self.cond1 = nn.Sequential(nn.SiLU(), zero_linear(embed_dim, 3*embed_dim))
+        self.cond2 = nn.Sequential(nn.SiLU(), zero_linear(embed_dim, 3*embed_dim))
 
-
-    def _init_block(self):
-        # qkv/proj
-        nn.init.xavier_uniform_(self.attn.qkv.weight); nn.init.zeros_(self.attn.qkv.bias)
-        nn.init.zeros_(self.attn.proj.weight); nn.init.zeros_(self.attn.proj.bias)
-
-        # FFN GEGLU: up → (2*4D), dn → (4D -> D)
-        nn.init.xavier_uniform_(self.ffn_up.weight); nn.init.zeros_(self.ffn_up.bias)
-        nn.init.zeros_(self.ffn_dn.bias); nn.init.zeros_(self.ffn_dn.weight)
-
-        # AdaLN conditioning MLPs: allow modulation & gate from step 1
-        for mlp in (self.cond1, self.cond2):
-            lin = mlp[-1]  # the last Linear
-            nn.init.zeros_(lin.bias); nn.init.xavier_uniform_(lin.weight)
-
-        # --- AdaLN gates: start near zero so blocks fade in smoothly
         with torch.no_grad():
-            D = self.norm1.normalized_shape[0]
-            self.cond1[-1].bias.zero_()
-            self.cond2[-1].bias.zero_()
-            # gate biases slightly > 0.0 to allow gradients to flow, but tiny:
+            D = embed_dim
             self.cond1[-1].bias[2*D:3*D].fill_(0.05)
             self.cond2[-1].bias[2*D:3*D].fill_(0.05)
 
-    def _modulate(self, x, t_proj):
-        shift, scale, gate = t_proj.chunk(3, dim=-1)  # (B,D) each
+        self.res_scale = 1.0 / (2**0.5)
+        self.use_rope = use_rope
+        self.rope = RotaryEmbedding(embed_dim // num_heads) if use_rope else None
+
+        # NEW: input-conditioning cross-attention
+        self.xattn = CrossAttention(embed_dim, num_heads)
+
+    def _mod(self, x, tproj):
+        shift, scale, gate = tproj.chunk(3, dim=-1)
         x = x * (1 + scale.unsqueeze(1)) + shift.unsqueeze(1)
         return x, gate
-    
-    def _local_mix(self, x, Fp, Tp):
-        # x: (B,N,D) -> (B,D,Fp,Tp) -> DWConv -> back
-        B, N, D = x.shape
-        x2 = x.transpose(1, 2).reshape(B, D, Fp, Tp)
-        x2 = self.dwconv(x2)
-        x2 = x2.reshape(B, D, N).transpose(1, 2)
-        return x2
 
     def forward(self, x, t_emb, grid_shape=None, cond_tokens=None):
-        # Attention + adaLN
+        # Self-attention
         y = self.norm1(x)
-        t1 = self.cond1(t_emb)
-        y, g1 = self._modulate(y, t1)
-        y = self.attn(y, self.rope)
-        y = y * g1.unsqueeze(1)
-        x = x + self.res_scale * y
+        t1 = self.cond1(t_emb); y, g1 = self._mod(y, t1)
+        y = self.attn(y, self.rooth if hasattr(self,'rooth') else self.rope)  # self.rope if enabled
+        x = x + self.res_scale * (y * g1.unsqueeze(1))
 
-        # after self-attn residual:
+        # NEW: cross-attention to input tokens
         if cond_tokens is not None:
-            y = self.xattn(x, cond_tokens)   # starts as identity due to zero-inited proj
-            x = x + self.res_scale * y
-
-        # Local DWConv injection (uses actual grid if given)
-        if grid_shape is not None:
-            Fp, Tp = grid_shape
-        else:
-            Fp, Tp = self.Fp_hint, self.Tp_hint
-        x = x + self._local_mix(x, Fp, Tp) * 1.0  # residual local mix (starts as identity)
+            y2 = self.xattn(x, cond_tokens)    # starts as 0-contribution
+            x  = x + self.res_scale * y2
 
         # FFN
         y = self.norm2(x)
-        t2 = self.cond2(t_emb)
-        y, g2 = self._modulate(y, t2)
+        t2 = self.cond2(t_emb); y, g2 = self._mod(y, t2)
         u, g = self.ffn_up(y).chunk(2, dim=-1)
         y = self.ffn_dn(F.gelu(u) * g)
-        y = y * g2.unsqueeze(1)
-        x = x + self.res_scale * y
-
+        x = x + self.res_scale * (y * g2.unsqueeze(1))
         return x
 
-
-def _block_forward_with_relbias_fallback(blk: TransformerBlockCond, x, t_emb, rel_bias):
-    y = blk.norm1(x)
-    t1 = blk.cond1(t_emb)
-    y, g1 = blk._modulate(y, t1)
-    # pass rel_bias to attention
-    y = blk.attn(y, blk.rope, rel_bias=rel_bias)
-    y = y * g1.unsqueeze(1)
-    x = x + blk.res_scale * y
-
-    y = blk.norm2(x)
-    t2 = blk.cond2(t_emb)
-    y, g2 = blk._modulate(y, t2)
-    u, g = blk.ffn_up(y).chunk(2, dim=-1)
-    y = blk.ffn_dn(F.gelu(u) * g)
-    y = y * g2.unsqueeze(1)
-    x = x + blk.res_scale * y
-    return x
     
 
 # =============================================================
@@ -466,12 +401,22 @@ class TransformerDiffuser(nn.Module):
             self._pe_shape = grid_shape
         return self._pe_cache
 
-    def forward(self, x: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, t: torch.Tensor, sc: torch.Tensor | None = None) -> torch.Tensor:
         B, C, F_in, T_in = x.shape
         tokens, grid = self.patch_embed(x)           # (B, N, D), grid=(Fp,Tp)
-        # after patch_embed
+
+        base_cond = tokens.detach()         # freeze conditioning branch (stable)
+
         assert tokens.shape[1] == grid[0] * grid[1], f"N={tokens.shape[1]} vs Fp*Tp={grid}"
         Fp, Tp = grid
+
+        # if self-conditioning provided, concat its tokens as extra condition
+        extra_cond = None
+        if sc is not None:
+            extra_cond = self.patch_embed(sc)[0].detach()
+            cond_tokens = torch.cat([base_cond, extra_cond], dim=1)
+        else:
+            cond_tokens = base_cond
 
         # 2D absolute PE (if enabled)
         pe = self._pos_embed(grid, tokens.device)
@@ -483,9 +428,8 @@ class TransformerDiffuser(nn.Module):
             self._relpos = RelPosBias2D(self.cfg.num_heads, Fp, Tp).to(tokens.device)
 
         # time embedding
-        t_emb = self.t_embed(t)
+        t_emb, s = self.t_embed(t)
 
-        cond_tokens = tokens.detach()  # freeze or keep grads; try detach first
 
         # transformer blocks (pass rel_bias to attention)
         for i, blk in enumerate(self.blocks):
@@ -507,7 +451,7 @@ class TransformerDiffuser(nn.Module):
             out = out[..., :F_in, :T_in]
 
         out = out * self.out_gain  # (B,4,F,T) scaled per channel
-        return out
+        return out, s
 
 
 def reinit_projections_orthonormal(model):

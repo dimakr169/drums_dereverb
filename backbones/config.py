@@ -32,7 +32,7 @@ class Config:
 
 
         """TransformerDiffuser (Cold Diffusion)"""
-        self.embed_dim = 768
+        self.embed_dim = 512
         self.num_heads = 8
         self.num_layers = 4
         self.max_freq = 1000.0 # use if continuous_emb = True

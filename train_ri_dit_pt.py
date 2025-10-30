@@ -240,6 +240,7 @@ class ColdDiffTransformerTrainer:
 
         # alpha_bar[0..T]
         self.alpha_bar = make_alpha_bar(self.diffusion_steps, device=self.device, kind=self.alpha_mode)
+        self.current_epoch = 0  # initializer for epoch
 
         # optimizer
         self.optimizer = torch.optim.AdamW(
@@ -315,10 +316,23 @@ class ColdDiffTransformerTrainer:
         return istft_from_ri(ri_stft, n_fft=n_fft, hop=hop, win_length=win,
                              window=self.window, center=self.center, length=length)
 
-
     def _random_timesteps(self, bsize):
         # Uniform integers in [1, T]
         return torch.randint(low=1, high=self.diffusion_steps+1, size=(bsize,), device=self.device)
+
+
+    #def _random_timesteps(self, bsize, epoch=None):
+    #    """Curriculum: epochs 0..0 -> mid band, 1..2 -> wider, >=3 -> full."""
+    #    if epoch is None:
+    #        lo, hi = 1, self.diffusion_steps
+    #    else:
+    #        if epoch < 1:
+    #            lo, hi = max(1, self.diffusion_steps // 3), min(self.diffusion_steps, 2 * self.diffusion_steps // 3)
+    #        elif epoch < 3:
+    #            lo, hi = 2, self.diffusion_steps - 1
+    #        else:
+    #            lo, hi = 1, self.diffusion_steps
+    #    return torch.randint(low=lo, high=hi + 1, size=(bsize,), device=self.device)
 
     def _levels_for(self, t):
         # returns (alpha_t, alpha_{t-1}) as (B,)
@@ -332,6 +346,7 @@ class ColdDiffTransformerTrainer:
         clean_ri  = clean_ri.to(self.device, non_blocking=True)
 
         bsize = reverb_ri.shape[0]
+        # timesteps = self._random_timesteps(bsize, epoch=self.current_epoch)  # (B,)
         timesteps = self._random_timesteps(bsize)  # (B,)
         a_t, a_tm1 = self._levels_for(timesteps)
 
@@ -343,18 +358,48 @@ class ColdDiffTransformerTrainer:
             if self.residual_mode:
                 # Normalized velocity v_t = (x_{t-1}-x_t) / g_t,  g_t = a_{t-1}-a_t  (linear mix only)
                 g = (a_tm1 - a_t).clamp_min(1e-6).view(-1,1,1,1)       # (B,1,1,1)
-
-                est_v   = self.model(noised, timesteps)                # v̂_t
-                est_ri  = noised + g * est_v                           # x̂_{t-1}
+                est_v, s  = self.model(noised, timesteps)                # v̂_t
+                s = s.view(-1, 1, 1, 1)    # make s broadcastable to RI (B,1,1,1)
+                est_ri = noised + (s * g) * est_v                          # x̂_{t-1}
                 target_v = (noised_next - noised) / g
-                # Optional per-t weighting to equalize contribution across t:
-                # w = (g / g.mean()).detach()             # normalize
-                # noise_loss = self.l1(est_v * w, target_v * w) * 35.0
-                noise_loss = self.l1(est_v, target_v) * 35.0 # non weight
+                # Optional Per-t reweighting of the velocity loss
+                w = (g / (g.mean() + 1e-8)).detach()
+                res_noise_loss = self.l1(est_v * w, target_v * w) * 35.0
+                ri_step_loss = self.l1(est_ri, noised_next) * 15.0  # small weight
+                noise_loss = res_noise_loss + ri_step_loss
 
             else:
-                est_ri    = self.model(noised, timesteps)                  # x̂_{t-1}
+                # --- Self-conditioning (teacher-forced) ---
+                sc_p = 0.5                               # prob. to use GT self-conditioning
+                use_sc = (torch.rand(()) < sc_p).item()
+                sc_tensor = noised_next if use_sc else None
+                # forward; model returns (x_hat_{t-1}, s) — s is unused in direct mode
+                est_ri, _ = self.model(noised, timesteps, sc=sc_tensor)
                 noise_loss = self.l1(est_ri, noised_next) * 50.0
+
+                # ---  2-step consistency loss (cheap, stochastic) ---
+                # Teaches composition x_t -> x_{t-1} -> x_{t-2} to match the ground truth.
+                if torch.rand(()) < 0.50:
+                    # pick a single τ for the whole batch for speed
+                    tau = torch.randint(low=2, high=self.diffusion_steps + 1, size=(1,), device=self.device)
+                    a_tau, a_tau_m1 = self._levels_for(tau)          # τ, τ-1
+                    a_tau_m2, _     = self._levels_for(tau - 1)      # τ-2, τ-3 (we use τ-2)
+
+                    x_tau    = self.diffusion(reverb_ri, clean_ri, a_tau)      # x_τ
+                    x_tau_m1 = self.diffusion(reverb_ri, clean_ri, a_tau_m1)   # x_{τ-1}
+                    x_tau_m2 = self.diffusion(reverb_ri, clean_ri, a_tau_m2)   # x_{τ-2}
+
+                    # Step 1: predict x_{τ-1} from x_τ (SC on GT)
+                    xhat_tau_m1, _ = self.model(x_tau, tau.expand(bsize), sc=x_tau_m1)
+                    # Step 2: predict x_{τ-2} from xhat_{τ-1} (SC on GT for stability)
+                    xhat_tau_m2, _ = self.model(xhat_tau_m1, (tau-1).expand(bsize), sc=x_tau_m2)
+
+                    cons_ri   = self.l1(xhat_tau_m2, x_tau_m2) * 25.0
+                    # (optional) small audio term for consistency
+                    cons_audio = self.l1(self.get_signal_from_RI_stft(xhat_tau_m2),
+                                        self.get_signal_from_RI_stft(x_tau_m2)) * 200
+
+                    noise_loss = 0.5 * noise_loss + 0.5 * (cons_ri +  cons_audio)  # 
 
 
             # Audio-domain MAE
@@ -395,20 +440,29 @@ class ColdDiffTransformerTrainer:
 
     @torch.no_grad()
     def reverse_diffusion(self, inp_ri, step_stop=0):
-        # inp_ri: (B,4,F,T)
+        """
+        Run full reverse chain x_T -> x_{step_stop}.
+        - If residual_prediction=True: model returns (v_hat, s); we update x <- x + (s*g)*v_hat.
+        - If residual_prediction=False: model returns (x_hat_tm1, s); we optionally feed self-conditioning.
+        """
         bsize = inp_ri.shape[0]
-        xs = []
         x = inp_ri
+        xs = []
+        sc = None  # for direct mode self-conditioning
+
         for t in range(self.diffusion_steps, step_stop, -1):
             T = torch.full((bsize,), t, device=self.device, dtype=torch.long)
             if self.residual_mode:
                 a_t   = self.alpha_bar.index_select(0, T)          # (B,)
                 a_tm1 = self.alpha_bar.index_select(0, T-1)
                 g = (a_tm1 - a_t).clamp_min(1e-6).view(-1,1,1,1)
-                v = self.model(x, T)
-                x = x + g * v
+                v_hat, s = self.model(x, T, sc=None)            # (B,4,F,T), (B,1)
+                x = x + (s.view(-1,1,1,1) * g) * v_hat          # scaled velocity step
             else:
-                x = self.model(x, T)      # direct x̂_{t-1}
+                # Direct mode with self-conditioning on previous estimate:
+                x_hat, _s = self.model(x, T, sc=sc)             # sc is previous x_{t} (or GT during teacher forcing)
+                sc = x                                         # next step will get current x as conditioning
+                x = x_hat
 
             xs.append(x)
         return xs  # list of (B,4,F,T)
@@ -458,6 +512,7 @@ class ColdDiffTransformerTrainer:
         for epoch in range(self.train_params.epochs):
             print(f"\nStart of epoch {epoch}")
             t0 = time.time()
+            self.current_epoch = epoch  
 
             # ---- Train ----
             self.model.train(True)
@@ -493,6 +548,7 @@ class ColdDiffTransformerTrainer:
                     self.sisdri.update(out["clean_wav"], out["est_wav"], out["inp_wav"]) 
 
             self.ema.restore()
+            self.ema.decay = min(0.999, 0.90 + 0.02 * self.current_epoch)
 
             noise_avg = noise_sum / max(n_batches,1)
             audio_avg = audio_sum / max(n_batches,1)
@@ -561,7 +617,7 @@ def main():
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--data-dir", default="data/out_combined_stereo")
-    parser.add_argument("--model-name", default="CDiff_DiT_s_768d-8h_4l_cos2")
+    parser.add_argument("--model-name", default="CDiff_DiT_s_512d-8h_4l_cos2")
     parser.add_argument("--gpu", default=0, type=int)
     args = parser.parse_args()
 
@@ -600,6 +656,7 @@ def main():
     trainer = ColdDiffTransformerTrainer(model, pre_params, train_params, model_params, 
                                     dataloaders, out_dir, device=device)
     trainer.train()
+
 
 if __name__ == "__main__":
     main()
