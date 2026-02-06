@@ -1,0 +1,1067 @@
+ {
+        "cdiffuse_unet_64ch_att_t50": {
+        "type": "unet",
+        "scheme": "cdiffuse",                     
+        "ckpt": "saved_models/CDiffuse_UNet_s_64ch_att_1248/checkpoints/latest.pt",
+        "diffusion_steps": 200,
+        "sampling_steps": 50,      
+        "model_config": {
+            "in_chans": 8,
+            "dropout": 0.1, 
+            "continuous_emb": false,
+            "use_ckpt": true,
+            "residual_prediction": false,
+            "num_res_blocks": 2,
+            "use_attention": true,
+            "channels": 64,
+            "ch_mult": [1, 2, 4, 8],
+            "use_norm": true,
+            "num_groups": 8,
+            "resample_with_conv": true
+        }
+    },    
+      "cold_unet_64ch_att_delta_VAR-4_euler": {
+        "type": "unet", 
+        "scheme": "cold_var",                    
+        "ckpt": "saved_models/CDiff_UNet_s_64ch_att_1248_delta-norm_var/checkpoints/latest.pt",
+        "mode": "next_delta_norm", 
+        "alpha_mode": "cos2",
+        "diffusion_steps": 16,
+        "reverse_steps": 4,
+        "solver": "euler",      
+        "model_config": {
+            "in_chans": 4,
+            "dropout": 0.1, 
+            "continuous_emb": false,
+            "use_ckpt": true,
+            "residual_prediction": true,
+            "num_res_blocks": 2,
+            "use_attention": true,
+            "channels": 64,
+            "ch_mult": [1, 2, 4, 8],
+            "use_norm": true,
+            "num_groups": 8,
+            "resample_with_conv": true
+        }
+    },
+
+  "cold_unet_64ch_att_delta_emb_VAR-4_euler": {
+        "type": "unet", 
+        "scheme": "cold_var",                    
+        "ckpt": "saved_models/CDiff_UNet_s_64ch_att_1248_delta-norm_var-adamW-emb_var/checkpoints/latest.pt",
+        "mode": "next_delta_norm", 
+        "alpha_mode": "cos2",
+        "diffusion_steps": 16,
+        "reverse_steps": 4,
+        "solver": "euler",      
+        "model_config": {
+            "in_chans": 4,
+            "dropout": 0.1, 
+            "continuous_emb": true,
+            "use_ckpt": true,
+            "residual_prediction": true,
+            "num_res_blocks": 2,
+            "use_attention": true,
+            "channels": 64,
+            "ch_mult": [1, 2, 4, 8],
+            "use_norm": true,
+            "num_groups": 8,
+            "resample_with_conv": true
+        }
+    },
+
+
+
+  "cold_unet_64ch_att_delta_VAR-16_euler": {
+        "type": "unet", 
+        "scheme": "cold_var",                    
+        "ckpt": "saved_models/CDiff_UNet_s_64ch_att_1248_delta-norm_var/checkpoints/latest.pt",
+        "mode": "next_delta_norm", 
+        "alpha_mode": "cos2",
+        "diffusion_steps": 16,
+        "reverse_steps": 16,
+        "solver": "euler",      
+        "model_config": {
+            "in_chans": 4,
+            "dropout": 0.1, 
+            "continuous_emb": false,
+            "use_ckpt": true,
+            "residual_prediction": true,
+            "num_res_blocks": 2,
+            "use_attention": true,
+            "channels": 64,
+            "ch_mult": [1, 2, 4, 8],
+            "use_norm": true,
+            "num_groups": 8,
+            "resample_with_conv": true
+        }
+    },
+
+  "cold_unet_64ch_att_delta_emb_VAR-16_euler": {
+        "type": "unet", 
+        "scheme": "cold_var",                    
+        "ckpt": "saved_models/CDiff_UNet_s_64ch_att_1248_delta-norm_var-adamW-emb_var/checkpoints/latest.pt",
+        "mode": "next_delta_norm", 
+        "alpha_mode": "cos2",
+        "diffusion_steps": 16,
+        "reverse_steps": 16,
+        "solver": "euler",      
+        "model_config": {
+            "in_chans": 4,
+            "dropout": 0.1, 
+            "continuous_emb": true,
+            "use_ckpt": true,
+            "residual_prediction": true,
+            "num_res_blocks": 2,
+            "use_attention": true,
+            "channels": 64,
+            "ch_mult": [1, 2, 4, 8],
+            "use_norm": true,
+            "num_groups": 8,
+            "resample_with_conv": true
+        }
+    },
+
+
+  "cold_unet_64ch_att_delta_VAR-64_euler": {
+        "type": "unet", 
+        "scheme": "cold_var",                    
+        "ckpt": "saved_models/CDiff_UNet_s_64ch_att_1248_delta-norm_var/checkpoints/latest.pt",
+        "mode": "next_delta_norm", 
+        "alpha_mode": "cos2",
+        "diffusion_steps": 16,
+        "reverse_steps": 64,
+        "solver": "euler",      
+        "model_config": {
+            "in_chans": 4,
+            "dropout": 0.1, 
+            "continuous_emb": false,
+            "use_ckpt": true,
+            "residual_prediction": true,
+            "num_res_blocks": 2,
+            "use_attention": true,
+            "channels": 64,
+            "ch_mult": [1, 2, 4, 8],
+            "use_norm": true,
+            "num_groups": 8,
+            "resample_with_conv": true
+        }
+    },
+
+  "cold_unet_64ch_att_delta_emb_VAR-64_euler": {
+        "type": "unet", 
+        "scheme": "cold_var",                    
+        "ckpt": "saved_models/CDiff_UNet_s_64ch_att_1248_delta-norm_var-adamW-emb_var/checkpoints/latest.pt",
+        "mode": "next_delta_norm", 
+        "alpha_mode": "cos2",
+        "diffusion_steps": 16,
+        "reverse_steps": 64,
+        "solver": "euler",      
+        "model_config": {
+            "in_chans": 4,
+            "dropout": 0.1, 
+            "continuous_emb": true,
+            "use_ckpt": true,
+            "residual_prediction": true,
+            "num_res_blocks": 2,
+            "use_attention": true,
+            "channels": 64,
+            "ch_mult": [1, 2, 4, 8],
+            "use_norm": true,
+            "num_groups": 8,
+            "resample_with_conv": true
+        }
+    },
+
+    "cold_dit_768d_8h5l_19_9_s4_temb_VAR4_euler": {
+        "type": "dit2",
+        "scheme": "cold_var",                    
+        "ckpt": "saved_models/CDiff_DiT_s_768d-8h_5l_cos2_19_9_s4_temb_var/checkpoints/latest.pt",
+        "mode": "next_delta_norm", 
+        "alpha_mode": "cos2",
+        "diffusion_steps": 16, 
+        "reverse_steps": 4,
+        "solver": "euler",       
+        "model_config": {
+            "in_chans": 4,
+            "dropout": 0.0, 
+            "continuous_emb": true,
+            "residual_prediction": true,
+            "embed_dim": 768,
+            "num_heads": 8,
+            "num_layers": 5,
+            "max_freq": 1000.0,
+            "patch_f": 19,
+            "patch_t": 9,
+            "time_stride": 4,
+            "pos_embed": "none",
+            "use_rope": true,
+            "use_conditioner": false,
+            "use_smap": false,
+            "ffn_activation": "gelu",
+            "norm_type": "layernorm",
+            "groupnorm_groups": 8,
+            "use_adaln": true,
+            "use_stereo_mask": false,
+            "shared_stereo_mask": false
+        }
+    },   
+
+
+    "cold_dit_768d_8h5l_19_9_s4_temb_VAR16_euler": {
+        "type": "dit2",
+        "scheme": "cold_var",                    
+        "ckpt": "saved_models/CDiff_DiT_s_768d-8h_5l_cos2_19_9_s4_temb_var/checkpoints/latest.pt",
+        "mode": "next_delta_norm", 
+        "alpha_mode": "cos2",
+        "diffusion_steps": 16, 
+        "reverse_steps": 16,
+        "solver": "euler",       
+        "model_config": {
+            "in_chans": 4,
+            "dropout": 0.0, 
+            "continuous_emb": true,
+            "residual_prediction": true,
+            "embed_dim": 768,
+            "num_heads": 8,
+            "num_layers": 5,
+            "max_freq": 1000.0,
+            "patch_f": 19,
+            "patch_t": 9,
+            "time_stride": 4,
+            "pos_embed": "none",
+            "use_rope": true,
+            "use_conditioner": false,
+            "use_smap": false,
+            "ffn_activation": "gelu",
+            "norm_type": "layernorm",
+            "groupnorm_groups": 8,
+            "use_adaln": true,
+            "use_stereo_mask": false,
+            "shared_stereo_mask": false
+        }
+    },    
+
+    "cold_dit_768d_8h5l_19_9_s4_temb_VAR64_euler": {
+        "type": "dit2",
+        "scheme": "cold_var",                    
+        "ckpt": "saved_models/CDiff_DiT_s_768d-8h_5l_cos2_19_9_s4_temb_var/checkpoints/latest.pt",
+        "mode": "next_delta_norm", 
+        "alpha_mode": "cos2",
+        "diffusion_steps": 16, 
+        "reverse_steps": 64,
+        "solver": "euler",       
+        "model_config": {
+            "in_chans": 4,
+            "dropout": 0.0, 
+            "continuous_emb": true,
+            "residual_prediction": true,
+            "embed_dim": 768,
+            "num_heads": 8,
+            "num_layers": 5,
+            "max_freq": 1000.0,
+            "patch_f": 19,
+            "patch_t": 9,
+            "time_stride": 4,
+            "pos_embed": "none",
+            "use_rope": true,
+            "use_conditioner": false,
+            "use_smap": false,
+            "ffn_activation": "gelu",
+            "norm_type": "layernorm",
+            "groupnorm_groups": 8,
+            "use_adaln": true,
+            "use_stereo_mask": false,
+            "shared_stereo_mask": false
+        }
+    },
+
+
+        "cold_dit_768d_8h5l_19_11_s4_temb": {
+        "type": "dit2",
+        "scheme": "cold",                    
+        "ckpt": "saved_models/CDiff_DiT_s_768d-8h_5l_cos2_19_11_s4_temb/checkpoints/latest.pt",
+        "mode": "next_delta_norm", 
+        "alpha_mode": "cos2",
+        "diffusion_steps": 16,      
+        "model_config": {
+            "in_chans": 4,
+            "dropout": 0.0, 
+            "continuous_emb": false,
+            "residual_prediction": true,
+            "embed_dim": 768,
+            "num_heads": 8,
+            "num_layers": 5,
+            "max_freq": 1000.0,
+            "patch_f": 19,
+            "patch_t": 11,
+            "time_stride": 4,
+            "pos_embed": "none",
+            "use_rope": true,
+            "use_conditioner": false,
+            "use_smap": false,
+            "ffn_activation": "gelu",
+            "norm_type": "layernorm",
+            "groupnorm_groups": 8,
+            "use_adaln": true,
+            "use_stereo_mask": false,
+            "shared_stereo_mask": false
+        }
+    },
+
+    "cold_dit_768d_8h5l_19_9_s4_temb": {
+        "type": "dit2",
+        "scheme": "cold",                    
+        "ckpt": "saved_models/CDiff_DiT_s_768d-8h_5l_cos2_19_9_s4_temb/checkpoints/latest.pt",
+        "mode": "next_delta_norm", 
+        "alpha_mode": "cos2",
+        "diffusion_steps": 16,      
+        "model_config": {
+            "in_chans": 4,
+            "dropout": 0.0, 
+            "continuous_emb": false,
+            "residual_prediction": true,
+            "embed_dim": 768,
+            "num_heads": 8,
+            "num_layers": 5,
+            "max_freq": 1000.0,
+            "patch_f": 19,
+            "patch_t": 9,
+            "time_stride": 4,
+            "pos_embed": "none",
+            "use_rope": true,
+            "use_conditioner": false,
+            "use_smap": false,
+            "ffn_activation": "gelu",
+            "norm_type": "layernorm",
+            "groupnorm_groups": 8,
+            "use_adaln": true,
+            "use_stereo_mask": false,
+            "shared_stereo_mask": false
+        }
+    },
+
+    "cold_unet_64ch_att_delta": {
+        "type": "unet", 
+        "scheme": "cold",                    
+        "ckpt": "saved_models/CDiff_UNet_s_64ch_att_1248_delta-norm_cos2/checkpoints/latest.pt",
+        "mode": "next_delta_norm", 
+        "alpha_mode": "cos2",
+        "diffusion_steps": 16,      
+        "model_config": {
+            "in_chans": 4,
+            "dropout": 0.1, 
+            "continuous_emb": false,
+            "use_ckpt": true,
+            "residual_prediction": true,
+            "num_res_blocks": 2,
+            "use_attention": true,
+            "channels": 64,
+            "ch_mult": [1, 2, 4, 8],
+            "use_norm": true,
+            "num_groups": 8,
+            "resample_with_conv": true
+        }
+    },
+
+        "cold_unet_64ch_att_direct": {
+        "type": "unet",
+        "scheme": "cold",                     
+        "ckpt": "saved_models/CDiff_UNet_s_64ch_att_1248_none_cos2/checkpoints/latest.pt",
+        "mode": "direct", 
+        "alpha_mode": "cos2",
+        "diffusion_steps": 16,      
+        "model_config": {
+            "in_chans": 4,
+            "dropout": 0.1, 
+            "continuous_emb": false,
+            "use_ckpt": true,
+            "residual_prediction": false,
+            "num_res_blocks": 2,
+            "use_attention": true,
+            "channels": 64,
+            "ch_mult": [1, 2, 4, 8],
+            "use_norm": true,
+            "num_groups": 8,
+            "resample_with_conv": true
+        }
+    },
+
+    "cold_unet_64ch_att_delta_VAR-4": {
+        "type": "unet", 
+        "scheme": "cold_var",                    
+        "ckpt": "saved_models/CDiff_UNet_s_64ch_att_1248_delta-norm_var/checkpoints/latest.pt",
+        "mode": "next_delta_norm", 
+        "alpha_mode": "cos2",
+        "diffusion_steps": 16,
+        "reverse_steps": 4,      
+        "model_config": {
+            "in_chans": 4,
+            "dropout": 0.1, 
+            "continuous_emb": false,
+            "use_ckpt": true,
+            "residual_prediction": true,
+            "num_res_blocks": 2,
+            "use_attention": true,
+            "channels": 64,
+            "ch_mult": [1, 2, 4, 8],
+            "use_norm": true,
+            "num_groups": 8,
+            "resample_with_conv": true
+        }
+    },
+
+    "cold_unet_64ch_att_delta_VAR-8": {
+        "type": "unet", 
+        "scheme": "cold_var",                    
+        "ckpt": "saved_models/CDiff_UNet_s_64ch_att_1248_delta-norm_var/checkpoints/latest.pt",
+        "mode": "next_delta_norm", 
+        "alpha_mode": "cos2",
+        "diffusion_steps": 16,
+        "reverse_steps": 8,      
+        "model_config": {
+            "in_chans": 4,
+            "dropout": 0.1, 
+            "continuous_emb": false,
+            "use_ckpt": true,
+            "residual_prediction": true,
+            "num_res_blocks": 2,
+            "use_attention": true,
+            "channels": 64,
+            "ch_mult": [1, 2, 4, 8],
+            "use_norm": true,
+            "num_groups": 8,
+            "resample_with_conv": true
+        }
+    },
+
+
+    "cold_unet_64ch_att_delta_VAR-16": {
+        "type": "unet", 
+        "scheme": "cold_var",                    
+        "ckpt": "saved_models/CDiff_UNet_s_64ch_att_1248_delta-norm_var/checkpoints/latest.pt",
+        "mode": "next_delta_norm", 
+        "alpha_mode": "cos2",
+        "diffusion_steps": 16,
+        "reverse_steps": 16,        
+        "model_config": {
+            "in_chans": 4,
+            "dropout": 0.1, 
+            "continuous_emb": false,
+            "use_ckpt": true,
+            "residual_prediction": true,
+            "num_res_blocks": 2,
+            "use_attention": true,
+            "channels": 64,
+            "ch_mult": [1, 2, 4, 8],
+            "use_norm": true,
+            "num_groups": 8,
+            "resample_with_conv": true
+        }
+    },
+
+    "cold_unet_64ch_att_delta_VAR-32": {
+        "type": "unet", 
+        "scheme": "cold_var",                    
+        "ckpt": "saved_models/CDiff_UNet_s_64ch_att_1248_delta-norm_var/checkpoints/latest.pt",
+        "mode": "next_delta_norm", 
+        "alpha_mode": "cos2",
+        "diffusion_steps": 16,
+        "reverse_steps": 32,          
+        "model_config": {
+            "in_chans": 4,
+            "dropout": 0.1, 
+            "continuous_emb": false,
+            "use_ckpt": true,
+            "residual_prediction": true,
+            "num_res_blocks": 2,
+            "use_attention": true,
+            "channels": 64,
+            "ch_mult": [1, 2, 4, 8],
+            "use_norm": true,
+            "num_groups": 8,
+            "resample_with_conv": true
+        }
+    },
+
+    "cold_unet_64ch_att_delta_VAR-64": {
+        "type": "unet", 
+        "scheme": "cold_var",                    
+        "ckpt": "saved_models/CDiff_UNet_s_64ch_att_1248_delta-norm_var/checkpoints/latest.pt",
+        "mode": "next_delta_norm", 
+        "alpha_mode": "cos2",
+        "diffusion_steps": 16,
+        "reverse_steps": 64,          
+        "model_config": {
+            "in_chans": 4,
+            "dropout": 0.1, 
+            "continuous_emb": false,
+            "use_ckpt": true,
+            "residual_prediction": true,
+            "num_res_blocks": 2,
+            "use_attention": true,
+            "channels": 64,
+            "ch_mult": [1, 2, 4, 8],
+            "use_norm": true,
+            "num_groups": 8,
+            "resample_with_conv": true
+        }
+    },
+
+
+    "cold_unet_64ch_att_delta": {
+        "type": "unet", 
+        "scheme": "cold",                    
+        "ckpt": "saved_models/CDiff_UNet_s_64ch_att_1248_delta-norm_cos2/checkpoints/latest.pt",
+        "mode": "next_delta_norm", 
+        "alpha_mode": "cos2",
+        "diffusion_steps": 16,      
+        "model_config": {
+            "in_chans": 4,
+            "dropout": 0.1, 
+            "continuous_emb": false,
+            "use_ckpt": true,
+            "residual_prediction": true,
+            "num_res_blocks": 2,
+            "use_attention": true,
+            "channels": 64,
+            "ch_mult": [1, 2, 4, 8],
+            "use_norm": true,
+            "num_groups": 8,
+            "resample_with_conv": true
+        }
+    },
+
+        "cold_unet_64ch_att_direct": {
+        "type": "unet",
+        "scheme": "cold",                     
+        "ckpt": "saved_models/CDiff_UNet_s_64ch_att_1248_none_cos2/checkpoints/latest.pt",
+        "mode": "direct", 
+        "alpha_mode": "cos2",
+        "diffusion_steps": 16,      
+        "model_config": {
+            "in_chans": 4,
+            "dropout": 0.1, 
+            "continuous_emb": false,
+            "use_ckpt": true,
+            "residual_prediction": false,
+            "num_res_blocks": 2,
+            "use_attention": true,
+            "channels": 64,
+            "ch_mult": [1, 2, 4, 8],
+            "use_norm": true,
+            "num_groups": 8,
+            "resample_with_conv": true
+        }
+    },
+
+    "cold_dit_768d_8h6l_delta_rope_temb": {
+        "type": "dit2",
+        "scheme": "cold",                    
+        "ckpt": "saved_models/CDiff_DiT_s_768d-8h_6l_cos2_19_11_temb/checkpoints/latest.pt",
+        "mode": "next_delta_norm", 
+        "alpha_mode": "cos2",
+        "diffusion_steps": 16,      
+        "model_config": {
+            "in_chans": 4,
+            "dropout": 0.0, 
+            "continuous_emb": false,
+            "residual_prediction": true,
+            "embed_dim": 768,
+            "num_heads": 8,
+            "num_layers": 6,
+            "max_freq": 1000.0,
+            "patch_f": 19,
+            "patch_t": 11,
+            "time_stride": 5,
+            "pos_embed": "none",
+            "use_rope": true,
+            "use_conditioner": false,
+            "use_smap": false,
+            "ffn_activation": "gelu",
+            "norm_type": "layernorm",
+            "groupnorm_groups": 8,
+            "use_adaln": true,
+            "use_stereo_mask": false,
+            "shared_stereo_mask": false
+        }
+    },
+
+
+    "cold_dit_768d_8h4l_delta_rope_delta": {
+        "type": "dit",
+        "scheme": "cold",                    
+        "ckpt": "saved_models/CDiff_DiT_s_768d-8h_4l_rope_cos2_19_9/checkpoints/latest.pt",
+        "mode": "trust_region_delta", 
+        "alpha_mode": "cos2",
+        "diffusion_steps": 16,      
+        "model_config": {
+            "in_chans": 4,
+            "dropout": 0.0, 
+            "continuous_emb": false,
+            "residual_prediction": true,
+            "embed_dim": 768,
+            "num_heads": 8,
+            "num_layers": 4,
+            "max_freq": 1000.0,
+            "patch_f": 19,
+            "patch_t": 9,
+            "time_stride": 5,
+            "pos_embed": "none",
+            "use_rope": true,
+            "use_conditioner": false,
+            "use_smap": false,
+            "ffn_activation": "gelu",
+            "norm_type": "layernorm",
+            "groupnorm_groups": 8,
+            "use_adaln": true,
+            "use_stereo_mask": false,
+            "shared_stereo_mask": false
+        }
+    },
+
+    "cold_dit_768d_8h4l_delta_rope_res": {
+        "type": "dit",
+        "scheme": "cold",                    
+        "ckpt": "saved_models/CDiff_DiT_s_768d-8h_4l_rope_cos2_19_9/checkpoints/latest.pt",
+        "mode": "next_delta_norm", 
+        "alpha_mode": "cos2",
+        "diffusion_steps": 16,      
+        "model_config": {
+            "in_chans": 4,
+            "dropout": 0.0, 
+            "continuous_emb": false,
+            "residual_prediction": true,
+            "embed_dim": 768,
+            "num_heads": 8,
+            "num_layers": 4,
+            "max_freq": 1000.0,
+            "patch_f": 19,
+            "patch_t": 9,
+            "time_stride": 5,
+            "pos_embed": "none",
+            "use_rope": true,
+            "use_conditioner": false,
+            "use_smap": false,
+            "ffn_activation": "gelu",
+            "norm_type": "layernorm",
+            "groupnorm_groups": 8,
+            "use_adaln": true,
+            "use_stereo_mask": false,
+            "shared_stereo_mask": false
+        }
+    },
+
+
+    "cold_unet_64ch_att_delta": {
+        "type": "unet", 
+        "scheme": "cold",                    
+        "ckpt": "saved_models/CDiff_UNet_s_64ch_att_1248_delta-norm_cos2/checkpoints/latest.pt",
+        "mode": "next_delta_norm", 
+        "alpha_mode": "cos2",
+        "diffusion_steps": 16,      
+        "model_config": {
+            "in_chans": 4,
+            "dropout": 0.1, 
+            "continuous_emb": false,
+            "use_ckpt": true,
+            "residual_prediction": true,
+            "num_res_blocks": 2,
+            "use_attention": true,
+            "channels": 64,
+            "ch_mult": [1, 2, 4, 8],
+            "use_norm": true,
+            "num_groups": 8,
+            "resample_with_conv": true
+        }
+    },
+
+        "cold_unet_64ch_att_direct": {
+        "type": "unet",
+        "scheme": "cold",                     
+        "ckpt": "saved_models/CDiff_UNet_s_64ch_att_1248_none_cos2/checkpoints/latest.pt",
+        "mode": "direct", 
+        "alpha_mode": "cos2",
+        "diffusion_steps": 16,      
+        "model_config": {
+            "in_chans": 4,
+            "dropout": 0.1, 
+            "continuous_emb": false,
+            "use_ckpt": true,
+            "residual_prediction": false,
+            "num_res_blocks": 2,
+            "use_attention": true,
+            "channels": 64,
+            "ch_mult": [1, 2, 4, 8],
+            "use_norm": true,
+            "num_groups": 8,
+            "resample_with_conv": true
+        }
+    },
+
+    "cdiffuse_unet_64ch_att_t200": {
+        "type": "unet",
+        "scheme": "cdiffuse",                     
+        "ckpt": "saved_models/CDiffuse_UNet_s_64ch_att_1248/checkpoints/latest.pt",
+        "diffusion_steps": 200,
+        "sampling_steps": 200,      
+        "model_config": {
+            "in_chans": 8,
+            "dropout": 0.1, 
+            "continuous_emb": false,
+            "use_ckpt": true,
+            "residual_prediction": false,
+            "num_res_blocks": 2,
+            "use_attention": true,
+            "channels": 64,
+            "ch_mult": [1, 2, 4, 8],
+            "use_norm": true,
+            "num_groups": 8,
+            "resample_with_conv": true
+        }
+    }, 
+
+        "cdiffuse_unet_64ch_att_t16": {
+        "type": "unet",
+        "scheme": "cdiffuse",                     
+        "ckpt": "saved_models/CDiffuse_UNet_s_64ch_att_1248/checkpoints/latest.pt",
+        "diffusion_steps": 200,
+        "sampling_steps": 16,      
+        "model_config": {
+            "in_chans": 8,
+            "dropout": 0.1, 
+            "continuous_emb": false,
+            "use_ckpt": true,
+            "residual_prediction": false,
+            "num_res_blocks": 2,
+            "use_attention": true,
+            "channels": 64,
+            "ch_mult": [1, 2, 4, 8],
+            "use_norm": true,
+            "num_groups": 8,
+            "resample_with_conv": true
+        }
+    },    
+    
+        "sgmse+_unet_64ch_att_t100": {
+        "type": "unet",
+        "scheme": "sgmse",                     
+        "ckpt": "saved_models/SGMSE+_UNet_s_64ch_att_1248/checkpoints/latest.pt",
+        "diffusion_steps": 100,
+        "sampling_steps": 100,      
+        "model_config": {
+            "in_chans": 8,
+            "dropout": 0.1, 
+            "continuous_emb": true,
+            "use_ckpt": true,
+            "residual_prediction": false,
+            "num_res_blocks": 2,
+            "use_attention": true,
+            "channels": 64,
+            "ch_mult": [1, 2, 4, 8],
+            "use_norm": true,
+            "num_groups": 8,
+            "resample_with_conv": true
+        }
+    }, 
+
+
+    "sgmse+_unet_64ch_att_t16": {
+        "type": "unet",
+        "scheme": "sgmse",                     
+        "ckpt": "saved_models/SGMSE+_UNet_s_64ch_att_1248/checkpoints/latest.pt",
+        "diffusion_steps": 100,
+        "sampling_steps": 16,      
+        "model_config": {
+            "in_chans": 8,
+            "dropout": 0.1, 
+            "continuous_emb": true,
+            "use_ckpt": true,
+            "residual_prediction": false,
+            "num_res_blocks": 2,
+            "use_attention": true,
+            "channels": 64,
+            "ch_mult": [1, 2, 4, 8],
+            "use_norm": true,
+            "num_groups": 8,
+            "resample_with_conv": true
+        }
+    }, 
+
+    "dit_768d_8h4l_delta_rope_cond": {
+        "type": "dit",                    
+        "ckpt": "saved_models/CDiff_DiT_s_768d-8h_4l_rope_cond_cos2_19_9/checkpoints/latest.pt",
+        "mode": "next_delta_norm", 
+        "alpha_mode": "cos2",
+        "diffusion_steps": 16,      
+        "model_config": {
+            "in_chans": 4,
+            "dropout": 0.0, 
+            "continuous_emb": false,
+            "residual_prediction": true,
+            "embed_dim": 768,
+            "num_heads": 8,
+            "num_layers": 4,
+            "max_freq": 1000.0,
+            "patch_f": 19,
+            "patch_t": 9,
+            "time_stride": 5,
+            "pos_embed": "none",
+            "use_rope": true,
+            "use_conditioner": true,
+            "use_smap": false,
+            "ffn_activation": "gelu",
+            "norm_type": "layernorm",
+            "groupnorm_groups": 8,
+            "use_adaln": true,
+            "use_stereo_mask": false,
+            "shared_stereo_mask": false
+        }
+    },
+
+    "dit_768d_8h4l_delta_rope": {
+        "type": "dit",                    
+        "ckpt": "saved_models/CDiff_DiT_s_768d-8h_4l_rope_cos2_19_9/checkpoints/latest.pt",
+        "mode": "next_delta_norm", 
+        "alpha_mode": "cos2",
+        "diffusion_steps": 16,      
+        "model_config": {
+            "in_chans": 4,
+            "dropout": 0.0, 
+            "continuous_emb": false,
+            "residual_prediction": true,
+            "embed_dim": 768,
+            "num_heads": 8,
+            "num_layers": 4,
+            "max_freq": 1000.0,
+            "patch_f": 19,
+            "patch_t": 9,
+            "time_stride": 5,
+            "pos_embed": "none",
+            "use_rope": true,
+            "use_conditioner": false,
+            "use_smap": false,
+            "ffn_activation": "gelu",
+            "norm_type": "layernorm",
+            "groupnorm_groups": 8,
+            "use_adaln": true,
+            "use_stereo_mask": false,
+            "shared_stereo_mask": false
+        }
+    },
+
+
+    "unet_32ch_noatt_direct": {
+        "type": "unet",                    
+        "ckpt": "saved_models/CDiff_RI_s_1024-384_32ch/checkpoints/latest.pt",
+        "mode": "direct", 
+        "alpha_mode": "cos2",
+        "diffusion_steps": 16,      
+        "model_config": {
+            "in_chans": 4,
+            "dropout": 0.1, 
+            "continuous_emb": false,
+            "use_ckpt": true,
+            "residual_prediction": false,
+            "num_res_blocks": 2,
+            "use_attention": false,
+            "channels": 32,
+            "ch_mult": [1, 2, 4, 4],
+            "use_norm": true,
+            "num_groups": 4,
+            "resample_with_conv": true
+        }
+    },
+
+
+    "unet_32ch_noatt_delta": {
+        "type": "unet",                    
+        "ckpt": "saved_models/CDiff_RI_s_1024-384_32ch_delta-res_cos2/checkpoints/latest.pt",
+        "mode": "next_delta_norm", 
+        "alpha_mode": "cos2",
+        "diffusion_steps": 16,      
+        "model_config": {
+            "in_chans": 4,
+            "dropout": 0.1, 
+            "continuous_emb": false,
+            "use_ckpt": true,
+            "residual_prediction": true,
+            "num_res_blocks": 2,
+            "use_attention": false,
+            "channels": 32,
+            "ch_mult": [1, 2, 4, 4],
+            "use_norm": true,
+            "num_groups": 4,
+            "resample_with_conv": true
+        }
+    },
+
+
+    "unet_64ch_att_delta": {
+        "type": "unet",                    
+        "ckpt": "saved_models/CDiff_UNet_s_64ch_att_1248_delta-norm_cos2/checkpoints/latest.pt",
+        "mode": "next_delta_norm", 
+        "alpha_mode": "cos2",
+        "diffusion_steps": 16,      
+        "model_config": {
+            "in_chans": 4,
+            "dropout": 0.1, 
+            "continuous_emb": false,
+            "use_ckpt": true,
+            "residual_prediction": true,
+            "num_res_blocks": 2,
+            "use_attention": true,
+            "channels": 64,
+            "ch_mult": [1, 2, 4, 8],
+            "use_norm": true,
+            "num_groups": 8,
+            "resample_with_conv": true
+        }
+    },
+
+     "dit_512d_8h8l_delta": {
+        "type": "dit",                    
+        "ckpt": "saved_models/CDiff_DiT_s_512d-8h_8l_res_cos2/checkpoints/latest.pt",
+        "mode": "trust_region_delta", 
+        "alpha_mode": "cos2",
+        "diffusion_steps": 16,      
+        "model_config": {
+            "in_chans": 4,
+            "dropout": 0.0, 
+            "continuous_emb": false,
+            "residual_prediction": true,
+            "embed_dim": 512,
+            "num_heads": 8,
+            "num_layers": 8,
+            "max_freq": 1000.0,
+            "patch_f": 19,
+            "patch_t": 11,
+            "time_stride": 5,
+            "pos_embed": "sincos_2d",
+            "use_rope": false,
+            "use_conditioner": false,
+            "use_smap": false,
+            "ffn_activation": "gelu",
+            "norm_type": "layernorm",
+            "groupnorm_groups": 8,
+            "use_adaln": true,
+            "use_stereo_mask": false,
+            "shared_stereo_mask": false
+        }
+    },       
+
+     "dit_512d_8h4l_delta": {
+        "type": "dit",                    
+        "ckpt": "saved_models/CDiff_DiT_s_512d-8h_4l_res_cos2/checkpoints/latest.pt",
+        "mode": "trust_region_delta", 
+        "alpha_mode": "cos2",
+        "diffusion_steps": 16,      
+        "model_config": {
+            "in_chans": 4,
+            "dropout": 0.0, 
+            "continuous_emb": false,
+            "residual_prediction": true,
+            "embed_dim": 512,
+            "num_heads": 8,
+            "num_layers": 4,
+            "max_freq": 1000.0,
+            "patch_f": 19,
+            "patch_t": 11,
+            "time_stride": 5,
+            "pos_embed": "sincos_2d",
+            "use_rope": false,
+            "use_conditioner": false,
+            "use_smap": false,
+            "ffn_activation": "gelu",
+            "norm_type": "layernorm",
+            "groupnorm_groups": 8,
+            "use_adaln": true,
+            "use_stereo_mask": false,
+            "shared_stereo_mask": false
+        }
+    },   
+
+    "dit_768d_8h4l_delta_old": {
+        "type": "dit",                    
+        "ckpt": "saved_models/CDiff_DiT_s_768d-8h_4l_res_cos2/checkpoints/latest.pt",
+        "mode": "trust_region_delta", 
+        "alpha_mode": "cos2",
+        "diffusion_steps": 16,      
+        "model_config": {
+            "in_chans": 4,
+            "dropout": 0.0, 
+            "continuous_emb": false,
+            "residual_prediction": true,
+            "embed_dim": 768,
+            "num_heads": 8,
+            "num_layers": 4,
+            "max_freq": 1000.0,
+            "patch_f": 19,
+            "patch_t": 11,
+            "time_stride": 5,
+            "pos_embed": "sincos_2d",
+            "use_rope": false,
+            "use_conditioner": false,
+            "use_smap": false,
+            "ffn_activation": "gelu",
+            "norm_type": "layernorm",
+            "groupnorm_groups": 8,
+            "use_adaln": true,
+            "use_stereo_mask": false,
+            "shared_stereo_mask": false
+        }
+    },
+
+    "dit_768d_8h4l_delta": {
+        "type": "dit",                    
+        "ckpt": "saved_models/CDiff_DiT_s_784d-8h_4l_res_cos2_19_11/checkpoints/latest.pt",
+        "mode": "trust_region_delta", 
+        "alpha_mode": "cos2",
+        "diffusion_steps": 16,      
+        "model_config": {
+            "in_chans": 4,
+            "dropout": 0.0, 
+            "continuous_emb": false,
+            "residual_prediction": true,
+            "embed_dim": 784,
+            "num_heads": 8,
+            "num_layers": 4,
+            "max_freq": 1000.0,
+            "patch_f": 19,
+            "patch_t": 11,
+            "time_stride": 5,
+            "pos_embed": "sincos_2d",
+            "use_rope": false,
+            "use_conditioner": false,
+            "use_smap": false,
+            "ffn_activation": "gelu",
+            "norm_type": "layernorm",
+            "groupnorm_groups": 8,
+            "use_adaln": true,
+            "use_stereo_mask": false,
+            "shared_stereo_mask": false
+        }
+    },
+
+    "unet_64ch_att_direct": {
+        "type": "unet",                    
+        "ckpt": "saved_models/CDiff_UNet_s_64ch_att_1248_none_cos2/checkpoints/latest.pt",
+        "mode": "direct", 
+        "alpha_mode": "cos2",
+        "diffusion_steps": 16,      
+        "model_config": {
+            "in_chans": 4,
+            "dropout": 0.1, 
+            "continuous_emb": false,
+            "use_ckpt": true,
+            "residual_prediction": true,
+            "num_res_blocks": 2,
+            "use_attention": true,
+            "channels": 64,
+            "ch_mult": [1, 2, 4, 8],
+            "use_norm": true,
+            "num_groups": 8,
+            "resample_with_conv": true
+        }
+    }
+}

@@ -6,7 +6,7 @@ Created on Fri Jan  5 17:01:03 2024
 """
 
 from backbones.config import Config as ModelConfig
-from backbones.noam_scheduler import NoamScheduler
+# from backbones.noam_scheduler import NoamScheduler
 from dataset.config import Config as DataConfig
 
 
@@ -14,25 +14,32 @@ class TrainConfig:
     """Configuration for training loop."""
 
     def __init__(self):
-        # choose "fixed"  or  "cosine_restart or "warmup_cosine"
-        self.lr_policy     = "warmup_cosine"
-        self.learning_rate = 5e-5        # base LR  (ignored when cosine sets its own)
+        # choose "fixed"  or  "cosine_restart or "warmup_cosine"  "two_phase_cosine"
+        self.lr_policy     = "fixed"
+        self.learning_rate = 1e-4       # base LR  (ignored when cosine sets its own)
         self.warmup_steps  = 2_000          # optional warm‑up inside cosine
         self.restart_epochs = 30            # cosine restart period
         # warmup_cosine
-        self.warmup_initial_lr = 1e-8
-        self.warmup_epochs = 5
-        self.cosine_floor_factor = 1e-6
+        self.warmup_initial_lr = 1e-6
+        self.warmup_epochs = 3
+        self.cosine_floor_factor = 1e-2
         # Adam hyper‑params
-        self.ema_decay = 0.999
+        self.ema_decay = 0.995
         self.beta1 = 0.9
-        self.beta2 = 0.999
+        self.beta2 = 0.98 # 0.99 for UNet
         self.eps   = 1e-8 # 1e-9
+        self.weight_decay = 0.0
 
+        # cold diffusion params
+        self.diffusions_steps = 16  #10 default
+        self.diffusion_mode = 'linear' # linear, sqrt_pair, sqrt_aggresive
+        self.alpha_mode = 'cos2' # poly, cos2, exp, sigmoid
+        self.residual_mode  = 'none'  #next_delta_norm, clean_residual or none (direct spec generation)
+
+        
         # global params
-        self.diffusions_steps = 16 #10 default
-        self.epochs = 100
-        self.patience = 10
+        self.epochs = 200
+        self.patience = 7
         self.gen_val_batch = True # generate random val batch after epoch
 
         # path config
@@ -42,14 +49,14 @@ class TrainConfig:
         # model name
         self.name = "cold_diff_16steps"
 
-    def lr(self):
-        """Generate proper learning rate scheduler."""
-        mapper = {"noam": NoamScheduler}
-        if self.lr_policy == "fixed":
-            return self.learning_rate
-        if self.lr_policy in mapper:
-            return mapper[self.lr_policy](self.learning_rate, **self.lr_params)
-        raise ValueError("invalid lr_policy")
+    # def lr(self):
+    #    """Generate proper learning rate scheduler."""
+    #    mapper = {"noam": NoamScheduler}
+    #    if self.lr_policy == "fixed":
+    #        return self.learning_rate
+    #    if self.lr_policy in mapper:
+    #        return mapper[self.lr_policy](self.learning_rate, **self.lr_params)
+    #    raise ValueError("invalid lr_policy")
 
 
 class Config:

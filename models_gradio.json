@@ -1,0 +1,61 @@
+{
+  "Cold UNet 55M": {
+        "type": "unet", 
+        "scheme": "cold_var",                    
+        "ckpt": "saved_models/CDiff_UNet_s_64ch_att_1248_delta-norm_var/checkpoints/latest.pt",
+        "mode": "next_delta_norm", 
+        "alpha_mode": "cos2",
+        "diffusion_steps": 16,
+        "reverse_steps": 4,
+        "solver": "euler",      
+        "model_config": {
+            "in_chans": 4,
+            "dropout": 0.1, 
+            "continuous_emb": false,
+            "use_ckpt": true,
+            "residual_prediction": true,
+            "num_res_blocks": 2,
+            "use_attention": true,
+            "channels": 64,
+            "ch_mult": [1, 2, 4, 8],
+            "use_norm": true,
+            "num_groups": 8,
+            "resample_with_conv": true
+        }
+    },
+
+    "Cold Diffusion Transformer 57M": {
+        "type": "dit2",
+        "scheme": "cold_var",                    
+        "ckpt": "saved_models/CDiff_DiT_s_768d-8h_5l_cos2_19_9_s4_temb_var/checkpoints/latest.pt",
+        "mode": "next_delta_norm", 
+        "alpha_mode": "cos2",
+        "diffusion_steps": 16, 
+        "reverse_steps": 64,
+        "solver": "euler",       
+        "model_config": {
+            "in_chans": 4,
+            "dropout": 0.0, 
+            "continuous_emb": true,
+            "residual_prediction": true,
+            "embed_dim": 768,
+            "num_heads": 8,
+            "num_layers": 5,
+            "max_freq": 1000.0,
+            "patch_f": 19,
+            "patch_t": 9,
+            "time_stride": 4,
+            "pos_embed": "none",
+            "use_rope": true,
+            "use_conditioner": false,
+            "use_smap": false,
+            "ffn_activation": "gelu",
+            "norm_type": "layernorm",
+            "groupnorm_groups": 8,
+            "use_adaln": true,
+            "use_stereo_mask": false,
+            "shared_stereo_mask": false
+        }
+    }
+
+}
