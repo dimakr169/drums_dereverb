@@ -51,8 +51,8 @@ class Config:
         # 'mag_phase': for cold diffusion UNet with magnitude only
         # 'ri_mag_phase': for GaGNet with Real and Imaginary Parts enchanced with magnitude and phase
         # 'ri': for cold diffusion UNet, DCUNet, DCCRN with Real and Imaginary Parts
-        self.val_split = 0.2
-        self.batch_size = 4  # 24
+        self.val_split = 0.2 #0.2 default 0.999 for test set
+        self.batch_size = 6 # 5
 
     # window factory 
     def window_tensor(self, device="cpu"):

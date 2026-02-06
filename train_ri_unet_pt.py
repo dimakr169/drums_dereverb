@@ -288,10 +288,11 @@ class ColdRIUNetTrainer:
                 est_ri  = noised + g * est_v                           # x̂_{t-1}
                 target_v = (noised_next - noised) / g
                 # Optional per-t weighting to equalize contribution across t:
-                # w = (g / g.mean()).detach()             # normalize
-                # noise_loss = self.l1(est_v * w, target_v * w) * 35.0
-                noise_loss = self.l1(est_v, target_v) * 35.0
-                # noise_loss = self.l1(est_ri, noised_next) * 50.0
+                #w = (g / g.mean()).detach()             # normalize
+                # delta_loss = self.l1(est_v * w, target_v * w) * 35.0
+                delta_loss = self.l1(est_v, target_v ) * 35.0
+                noise_loss = self.l1(est_ri, noised_next) * 15.0
+                noise_loss = noise_loss + delta_loss
             elif self.residual_mode == "clean_residual":
                 # r_t = A - x_t ;  x_{t-1} = x_t + s_t * r̂_t, with s_t = (a_{t-1}-a_t)/(1-a_t)  (linear mix)
                 a_t, a_tm1 = self._levels_for(timesteps)
@@ -304,7 +305,7 @@ class ColdRIUNetTrainer:
                 # w = (1.0 - a_t).view(-1,1,1,1)
                 # noise_loss = self.l1(est_r * w, target_r * w) * 50.0
                 noise_loss = self.l1(est_r, target_r) * 50.0               
-            else:
+            elif self.residual_mode == "direct":
                 est_ri    = self.model(noised, timesteps)                  # x̂_{t-1}
                 noise_loss = self.l1(est_ri, noised_next) * 50.0
 
@@ -518,7 +519,7 @@ def main():
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--data-dir", default="data/out_combined_stereo")
-    parser.add_argument("--model-name", default="CDiff_RI_s_1024-384_32ch_delta-res_cos2")
+    parser.add_argument("--model-name", default="CDiff_UNet_s_64ch_att_1248_clean-res_cos2")
     parser.add_argument("--gpu", default=1, type=int)
     args = parser.parse_args()
 

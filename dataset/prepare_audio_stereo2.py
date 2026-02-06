@@ -84,7 +84,7 @@ def process_item(file_path, pre_params, anechoic_path, reverb_path, rir_folder):
                 )
 
                 # Random Pick of generation method
-                rir_method = random.choice(["pyroom", "rirgen", "real"])
+                rir_method = random.choice(["real"]) #["pyroom", "rirgen", "real"]
                 if rir_method == "pyroom":
                     lossy_ex, dry_ex = create_rir_conds_stereo(
                         t60,
@@ -137,8 +137,8 @@ def process_batch(file_paths, pre_params, anechoic_path, reverb_path, rir_folder
 def main(args):
     pre_params = Config()
     current_dir = Path.cwd()
-    data_dir = current_dir.parent / "data/gmd_musdb18hq_stereo" 
-    rir_folder = current_dir.parent / "data/OpenAir_RIRs_stereo" 
+    data_dir = current_dir.parent / "data/MoisesDB_test_clean"   #"data/gmd_musdb18hq_stereo" 
+    rir_folder = current_dir.parent / "data/ReverbFX_ACE_RIRs_test"  #"data/OpenAir_RIRs_stereo" 
     drum_files = load_drum_files(data_dir)
     print(f"Found {len(drum_files)} drum files.")
 
@@ -163,6 +163,6 @@ def main(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--out-path", default=str(Path.cwd().parent / "data/out_combined_stereo"), type=str)
+    parser.add_argument("--out-path", default=str(Path.cwd().parent / "data/moisesdb_test_rir-only"), type=str)
     args = parser.parse_args()
     main(args)

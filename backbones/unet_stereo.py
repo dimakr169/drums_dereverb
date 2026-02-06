@@ -219,7 +219,7 @@ class UNetRI(nn.Module):
             up_in_ch = out_ch
 
         # ---- output convs ----
-        out_c = 4 if config.ri_inp else 1   # stereo RI = 4 channels
+        out_c = 4 # deleted if config.ri_inp else 1   # stereo RI = 4 channels
         self.out_conv1 = nn.Conv2d(C, C, kernel_size=3, padding=1)
         self.out_conv2 = nn.Conv2d(C, out_c, kernel_size=3, padding=1)
 

@@ -196,6 +196,7 @@ def build_dataloaders(config, data_dir, seed: int = 42, num_workers: int = 4, pi
 
     train_ds = AD2Stereo(config, data_dir, train_files)
     val_ds   = AD2Stereo(config, data_dir, val_files)
+    # val_ds   = AD2Stereo(config, data_dir, train_files[:10])
 
     # reproducible worker seeding
     def seed_worker(worker_id):

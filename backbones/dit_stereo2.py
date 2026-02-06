@@ -36,23 +36,18 @@ class DiffusionTimeEmbedding(nn.Module):
         self.use_sine = use_sine
         self.max_freq = max_freq
         self.mlp = nn.Sequential(
-            nn.Linear(dim, dim), nn.SiLU(), nn.Linear(dim, dim)
+            nn.Linear(dim, dim),
+            nn.SiLU(),
+            nn.Linear(dim, dim),
         )
 
-        # Per-t learnable step scale s(t)
-        self.scale_head = nn.Sequential(nn.SiLU(), nn.Linear(dim, 1))
-        nn.init.zeros_(self.scale_head[-1].weight); nn.init.zeros_(self.scale_head[-1].bias)
-
-        self.s_logit_cap = 3.0  # ~sigmoid(±3) ≈ [0.047,0.953]
-
     def forward(self, t: torch.Tensor) -> torch.Tensor:
-        base = _sine_timestep_embedding(t, self.dim, self.max_freq) if self.use_sine else _ddpm_timestep_embedding(t, self.dim)
-        emb = self.mlp(base)                      # (B,D)
-        s_logits = self.scale_head(emb).clamp(-self.s_logit_cap, self.s_logit_cap)
-        s = torch.sigmoid(s_logits)
-
-        return emb, s
-
+        if self.use_sine:
+            base = _sine_timestep_embedding(t, self.dim, self.max_freq)
+        else:
+            base = _ddpm_timestep_embedding(t, self.dim)
+        emb = self.mlp(base)   # (B, D)
+        return emb
 
 # =============================================================
 # (Optional) Rotary Positional Embedding (1D over token index)
@@ -78,8 +73,6 @@ class RotaryEmbedding(nn.Module):
         cos = self.cos_cached[:N].unsqueeze(0).unsqueeze(0).to(q.device)  # (1,1,N,d)
         sin = self.sin_cached[:N].unsqueeze(0).unsqueeze(0).to(q.device)
         return self.rotate(q, cos, sin), self.rotate(k, cos, sin)
-
-
 
 # =============================================================
 # 2D Sin-Cos positional embedding for patch tokens
@@ -233,179 +226,69 @@ class SDPAttention(nn.Module):
         return self.proj(y)
 
 
-class RelPosBias2D(nn.Module):
-    """
-    Bounded, zero-centered 2D relative position bias.
-    rel_bias = scale * tanh(raw_bias_f ⊕ raw_bias_t), centered per-head.
-    """
-    def __init__(self, num_heads: int, Fp: int, Tp: int, init_scale: float = 0.5):
+
+class TransformerBlock(nn.Module):
+    def __init__(self, embed_dim: int, num_heads: int,  use_rope: bool = True):
         super().__init__()
+        self.embed_dim = embed_dim
         self.num_heads = num_heads
-        self.Fp = Fp
-        self.Tp = Tp
+        self.res_scale = 1.0 / (2.0 ** 0.5)
 
-        # Raw (unbounded) 1D biases
-        self.raw_f = nn.Parameter(torch.zeros(num_heads, 2 * Fp - 1))
-        self.raw_t = nn.Parameter(torch.zeros(num_heads, 2 * Tp - 1))
-        nn.init.zeros_(self.raw_f); nn.init.zeros_(self.raw_t)
+        self.norm1 = nn.LayerNorm(embed_dim)
+        self.norm2 = nn.LayerNorm(embed_dim)
 
-        # Learnable global scale (softplus to keep positive, small init)
-        self.log_scale = nn.Parameter(torch.log(torch.tensor(init_scale)))
+        self.attn = SDPAttention(embed_dim, num_heads)
+        # zero-init output proj for AdaLN-zero
+        nn.init.zeros_(self.attn.proj.weight)
+        nn.init.zeros_(self.attn.proj.bias)
 
-        # Precompute index maps
-        df = torch.arange(Fp)[:, None] - torch.arange(Fp)[None, :]
-        dt = torch.arange(Tp)[:, None] - torch.arange(Tp)[None, :]
-        self.register_buffer("df_index", (df + (Fp - 1)).long(), persistent=False)
-        self.register_buffer("dt_index", (dt + (Tp - 1)).long(), persistent=False)
+        self.mlp = nn.Sequential(
+            nn.Linear(embed_dim, 4 * embed_dim),
+            nn.GELU(),
+            nn.Linear(4 * embed_dim, embed_dim),
+        )
+        nn.init.zeros_(self.mlp[-1].weight)
+        nn.init.zeros_(self.mlp[-1].bias)
 
-    def forward(self) -> torch.Tensor:
-        h, Fp, Tp = self.num_heads, self.Fp, self.Tp
-        bf = torch.tanh(self.raw_f)[:, self.df_index]          # (h,Fp,Fp), bounded
-        bt = torch.tanh(self.raw_t)[:, self.dt_index]          # (h,Tp,Tp), bounded
-        b = bf[:, :, None, :, None] + bt[:, None, :, None, :]  # (h,Fp,Tp,Fp,Tp)
-        b = b.view(h, Fp * Tp, Fp * Tp)                        # (h,N,N)
-        # zero-center per head (don’t shift all logits)
-        b = b - b.mean(dim=(1, 2), keepdim=True)
-        scale = torch.nn.functional.softplus(self.log_scale).clamp(max=0.2)   # >0
-        return b * scale
+        # AdaLN-zero style time conditioning
+        def zero_linear(i, o):
+            lin = nn.Linear(i, o)
+            nn.init.zeros_(lin.weight)
+            nn.init.zeros_(lin.bias)
+            return lin
 
-class CrossAttention(nn.Module):
-    def __init__(self, embed_dim: int, num_heads: int):
-        super().__init__()
-        self.h = num_heads
-        self.d = embed_dim
-        self.dh = embed_dim // num_heads
-        self.q = nn.Linear(embed_dim, embed_dim)
-        self.kv = nn.Linear(embed_dim, 2 * embed_dim)
-        self.proj = nn.Linear(embed_dim, embed_dim)
-        # inits: let the output start as zero (identity-through-residual)
-        nn.init.xavier_uniform_(self.q.weight);  nn.init.zeros_(self.q.bias)
-        nn.init.xavier_uniform_(self.kv.weight); nn.init.zeros_(self.kv.bias)
-        nn.init.zeros_(self.proj.weight);        nn.init.zeros_(self.proj.bias)
+        self.cond1 = nn.Sequential(nn.SiLU(), zero_linear(embed_dim, 3 * embed_dim))
+        self.cond2 = nn.Sequential(nn.SiLU(), zero_linear(embed_dim, 3 * embed_dim))
 
-    def forward(self, x, cond):
-        # x: (B,N,D) -> Q ; cond: (B,M,D) -> K,V
-        B, N, D = x.shape
-        M = cond.shape[1]
-        q = self.q(x).view(B, N, self.h, self.dh).permute(0,2,1,3)               # (B,h,N,dh)
-        kv = self.kv(cond).view(B, M, 2, self.h, self.dh).permute(2,0,3,1,4)     # (2,B,h,M,dh)
-        k, v = kv[0], kv[1]                                                      # (B,h,M,dh)
-        q = q.reshape(B*self.h, N, self.dh)
-        k = k.reshape(B*self.h, M, self.dh)
-        v = v.reshape(B*self.h, M, self.dh)
-        y = F.scaled_dot_product_attention(q, k, v, dropout_p=0.0, is_causal=False)
-        y = y.reshape(B, self.h, N, self.dh).permute(0,2,1,3).contiguous().view(B, N, D)
-        return self.proj(y)
-
-
-# =============================================================
-# Conditional Transformer block with AdaLN-style conditioning
-# =============================================================
-class TransformerBlockCond(nn.Module):
-    def __init__(self, embed_dim: int, num_heads: int, dropout: float=0.0, use_rope: bool=False, 
-                 ffn_activation: str = "gelu",  norm_type: str = "layernorm", groupnorm_groups: int = 8, 
-                 use_adaln: bool = True):
-        super().__init__()
-
-        self.ffn_activation = ffn_activation
-        self.norm_type = norm_type
-        self.use_adaln = use_adaln
-        self.groupnorm_groups = groupnorm_groups
-
-        # --- Norms (token-wise, but GroupNorm needs a helper) ---
-        if norm_type == "groupnorm":
-            # We'll wrap the call; C = embed_dim, H*W = tokens
-            self.norm1 = nn.GroupNorm(groupnorm_groups, embed_dim)
-            self.norm2 = nn.GroupNorm(groupnorm_groups, embed_dim)
-        else:
-            self.norm1 = nn.LayerNorm(embed_dim)
-            self.norm2 = nn.LayerNorm(embed_dim)
-
-
-        self.attn  = SDPAttention(embed_dim, num_heads)
-        self.ffn_up = nn.Linear(embed_dim, 8 * embed_dim)
-        self.ffn_dn = nn.Linear(4 * embed_dim,  embed_dim)
-
-        # zero-init residual readouts (AdaLN-zero style)
-        nn.init.zeros_(self.attn.proj.weight); nn.init.zeros_(self.attn.proj.bias)
-        nn.init.zeros_(self.ffn_dn.weight);    nn.init.zeros_(self.ffn_dn.bias)
-
-        # time-cond MLPs (as you already have)
-        def zero_linear(i,o):
-            lin = nn.Linear(i,o); nn.init.zeros_(lin.weight); nn.init.zeros_(lin.bias); return lin
-        self.cond1 = nn.Sequential(nn.SiLU(), zero_linear(embed_dim, 3*embed_dim))
-        self.cond2 = nn.Sequential(nn.SiLU(), zero_linear(embed_dim, 3*embed_dim))
-
+        # small positive gate bias (like your current code)
         with torch.no_grad():
             D = embed_dim
-            self.cond1[-1].bias[2*D:3*D].fill_(0.05)
-            self.cond2[-1].bias[2*D:3*D].fill_(0.05)
+            self.cond1[-1].bias[2 * D : 3 * D].fill_(0.05)
+            self.cond2[-1].bias[2 * D : 3 * D].fill_(0.05)
 
-        self.res_scale = 1.0 / (2**0.5)
         self.use_rope = use_rope
         self.rope = RotaryEmbedding(embed_dim // num_heads) if use_rope else None
 
-        # NEW: input-conditioning cross-attention
-        self.xattn = CrossAttention(embed_dim, num_heads)
-
-    def _apply_norm(self, norm, x):
-        """
-        x: (B, N, D)
-        - LayerNorm: apply directly.
-        - GroupNorm: treat D as channels, N as spatial positions.
-        """
-        if isinstance(norm, nn.GroupNorm):
-            B, N, D = x.shape
-            # (B, N, D) -> (B, D, N)
-            x = x.transpose(1, 2)          # channels = D
-            x = norm(x)                    # GroupNorm over D
-            x = x.transpose(1, 2)          # back to (B, N, D)
-            return x
-        else:
-            return norm(x)
-
-
-    def _mod(self, x, tproj):
-        if (not self.use_adaln) or (tproj is None):
-            B, N, D = x.shape
-            gate = x.new_ones(B, D)
-            return x, gate
-        shift, scale, gate = tproj.chunk(3, dim=-1)
+    def _modulate(self, x, tproj):
+        shift, scale, gate = tproj.chunk(3, dim=-1)   # (B,D) each
         x = x * (1 + scale.unsqueeze(1)) + shift.unsqueeze(1)
         return x, gate
 
-    def forward(self, x, t_emb, grid_shape=None, cond_tokens=None):
+    def forward(self, x, t_emb):
         # Self-attention
-        y = self._apply_norm(self.norm1, x)
-        if self.use_adaln:
-            t1 = self.cond1(t_emb)
-        else:
-            t1 = None
-        y, g1 = self._mod(y, t1)
-        y = self.attn(y, self.rope if hasattr(self, "rope") else None)
-        x = x + self.res_scale * (y * g1.unsqueeze(1))
+        h = self.norm1(x)
+        t1 = self.cond1(t_emb)
+        h, g1 = self._modulate(h, t1)       # (B,N,D), (B,D)
+        h = self.attn(h, rope=self.rope)    # no rel_bias
+        x = x + self.res_scale * (h * g1.unsqueeze(1))
 
-        # NEW: cross-attention to input tokens
-        if cond_tokens is not None:
-            y2 = self.xattn(x, cond_tokens)    # starts as 0-contribution
-            x  = x + self.res_scale * y2
-
-        # FFN
-        y = self._apply_norm(self.norm2, x)
-        if self.use_adaln:
-            t2 = self.cond2(t_emb)
-        else:
-            t2 = None
-        y, g2 = self._mod(y, t2)
-        u, g = self.ffn_up(y).chunk(2, dim=-1)
-        if self.ffn_activation.lower() == "swiglu":
-            h = F.silu(u) * g           # SwiGLU
-        else:
-            h = F.gelu(u) * g           # current behavior (GEGLU-like)
-        y = self.ffn_dn(h)
-        x = x + self.res_scale * (y * g2.unsqueeze(1))
+        # MLP
+        h = self.norm2(x)
+        t2 = self.cond2(t_emb)
+        h, g2 = self._modulate(h, t2)
+        h = self.mlp(h)
+        x = x + self.res_scale * (h * g2.unsqueeze(1))
         return x
-
     
 
 # =============================================================
@@ -416,118 +299,91 @@ class TransformerDiffuser(nn.Module):
         super().__init__()
         self.cfg = config
         self.residual_prediction = config.residual_prediction
-        self.use_conditioner = config.use_conditioner
-        self.use_smap = config.use_smap
-        self.use_stereo_mask = config.use_stereo_mask
-        self.shared_stereo_mask = config.shared_stereo_mask
 
-        self.patch_embed = PatchEmbed(config.in_chans, config.embed_dim,
-                                      config.patch_f, config.patch_t,
-                                      time_stride=config.time_stride)
-        self.t_embed = DiffusionTimeEmbedding(config.embed_dim,
-                                              use_sine=config.continuous_emb,
-                                              max_freq=config.max_freq)
+        self.patch_embed = PatchEmbed(
+            config.in_chans, config.embed_dim,
+            config.patch_f, config.patch_t,
+            time_stride=config.time_stride
+        )
+
+        self.t_embed = DiffusionTimeEmbedding(
+            config.embed_dim,
+            use_sine=config.continuous_emb,
+            max_freq=config.max_freq,
+        )
+
+        # -----------------------------------------------------
+        # DiTSE-style auxiliary timestep embedding for tokens
+        # -----------------------------------------------------
+        # Project t-embedding to a "token-side" vector, then
+        # concatenate with patch tokens and project back to D.
+        self.t_tok_proj = nn.Sequential(
+            nn.SiLU(),
+            nn.Linear(config.embed_dim, config.embed_dim),
+        )
+        self.token_in_proj = nn.Linear(2 * config.embed_dim, config.embed_dim)
+
         self.blocks = nn.ModuleList([
-                        TransformerBlockCond(
-                            config.embed_dim,
-                            config.num_heads,
-                            config.dropout,
-                            use_rope=config.use_rope,
-                            ffn_activation=config.ffn_activation,
-                            norm_type=config.norm_type,
-                            groupnorm_groups=config.groupnorm_groups,
-                            use_adaln=config.use_adaln
-                        )
-                        for _ in range(config.num_layers)
-                    ])
-                
-        self.patch_unembed = PatchUnembed(config.in_chans, config.embed_dim,
-                                          config.patch_f, config.patch_t,
-                                          time_stride=config.time_stride)
+            TransformerBlock(
+                embed_dim=config.embed_dim,
+                num_heads=config.num_heads,
+                use_rope=config.use_rope,
+            )
+            for _ in range(config.num_layers)
+        ])
+
+        self.patch_unembed = PatchUnembed(
+            config.in_chans, config.embed_dim,
+            config.patch_f, config.patch_t,
+            time_stride=config.time_stride
+        )
 
         self.register_buffer("_pe_cache", torch.zeros(1), persistent=False)
         self._pe_shape = None
         self.block_embed = nn.Embedding(config.num_layers, config.embed_dim)
 
-        gain_init = 0.1 if self.residual_prediction else 1.0  # 0.05–0.2 also fine for residual
-        self.out_gain = nn.Parameter(torch.ones(1, self.cfg.in_chans, 1, 1) * gain_init)
-
-        # NEW: slot for relative position bias per grid
-        self._relpos = None                         # NEW
-
-        # NEW: conditioner head (optional)
-        if self.use_conditioner:
-            self.conditioner = nn.Sequential(
-                nn.Conv2d(config.in_chans, config.in_chans, kernel_size=3, padding=1),
-                nn.ReLU(),
-                nn.Conv2d(config.in_chans, config.in_chans, kernel_size=3, padding=1)
-                )
-
-        # NEW: s_map head (optional)
-        if self.use_smap:
-            self.s_out = nn.Sequential(
-                nn.Conv2d(config.in_chans, config.in_chans, kernel_size=1),
-                nn.Sigmoid()
-            )
+        gain_init = 0.1 if self.residual_prediction else 1.0
+        self.out_gain = nn.Parameter(
+            torch.ones(1, self.cfg.in_chans, 1, 1) * gain_init
+        )
 
     def _pos_embed(self, grid_shape, device):
         if self.cfg.pos_embed == "none" or self.cfg.use_rope:
             return None
         Fp, Tp = grid_shape
-        if self._pe_shape != grid_shape or (not torch.is_tensor(self._pe_cache)) or self._pe_cache.numel() <= 1:
+        if self._pe_shape != grid_shape or self._pe_cache.numel() <= 1:
             pe = _build_2d_sincos_pos_embed(Fp, Tp, self.cfg.embed_dim, device)
             self._pe_cache = pe
             self._pe_shape = grid_shape
         return self._pe_cache
 
-    def forward(self, x: torch.Tensor, t: torch.Tensor, sc: torch.Tensor | None = None) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, t: torch.Tensor):
         B, C, F_in, T_in = x.shape
-        tokens, grid = self.patch_embed(x)           # (B, N, D), grid=(Fp,Tp)
+        tokens, grid = self.patch_embed(x)  # (B,N,D), grid=(Fp,Tp)
+        t_emb = self.t_embed(t)  # if you keep only emb (no scale_head)
 
-        base_cond = tokens.detach()         # freeze conditioning branch (stable)
+        t_tok = self.t_tok_proj(t_emb)                    # (B, D)
+        t_tok = t_tok.unsqueeze(1).expand(-1, tokens.size(1), -1)  # (B, N, D)
 
-        assert tokens.shape[1] == grid[0] * grid[1], f"N={tokens.shape[1]} vs Fp*Tp={grid}"
-        Fp, Tp = grid
+        # Concatenate [tokens | t_tok] along feature dim, then
+        # project back to D so the rest of the blocks see D-dim.
+        tokens = torch.cat([tokens, t_tok], dim=-1)       # (B, N, 2D)
+        tokens = self.token_in_proj(tokens)               # (B, N, D)
 
-        # if self-conditioning provided, concat its tokens as extra condition
-        extra_cond = None
-        if sc is not None:
-            extra_cond = self.patch_embed(sc)[0].detach()
-            cond_tokens = torch.cat([base_cond, extra_cond], dim=1)
-        else:
-            cond_tokens = base_cond
-
-        # Conditioner head: provide coarse residual estimate from x
-        if self.use_conditioner:
-            x_coarse = self.conditioner(x)  # (B, 4, F, T)
-            coarse_tokens, _ = self.patch_embed(x_coarse)
-            cond_tokens = torch.cat([cond_tokens, coarse_tokens.detach()], dim=1)
-
-        # 2D absolute PE (if enabled)
         pe = self._pos_embed(grid, tokens.device)
         if pe is not None:
             tokens = tokens + pe.unsqueeze(0)
 
-        # NEW: build / refresh relative 2D bias for this grid
-        if (self._relpos is None) or (self._relpos.Fp != Fp) or (self._relpos.Tp != Tp):
-            self._relpos = RelPosBias2D(self.cfg.num_heads, Fp, Tp).to(tokens.device)
 
-        # time embedding
-        t_emb, s_scalar = self.t_embed(t)
-
-
-        # transformer blocks (pass rel_bias to attention)
         for i, blk in enumerate(self.blocks):
             t_blk = t_emb + self.block_embed.weight[i].unsqueeze(0)
-            tokens = blk(tokens, t_blk, grid_shape=grid, cond_tokens=cond_tokens)   # pass (Fp,Tp)
+            tokens = blk(tokens, t_blk)
 
-        # light readout → unembed
-        B, N, D = tokens.shape
-        out = self.patch_unembed(tokens, grid)       # (B, 4, F*, T*)
+        out = self.patch_unembed(tokens, grid)  # (B,C,F*,T*)
 
-        # crop/pad to input size
+        # Crop / pad to match input shape
         out = out[..., :F_in, :T_in]
-        F_out, T_out = out.shape[-2], out.shape[-1]
+        F_out, T_out = out.shape[-2:]
         if (F_out != F_in) or (T_out != T_in):
             pad_f = max(0, F_in - F_out)
             pad_t = max(0, T_in - T_out)
@@ -535,16 +391,11 @@ class TransformerDiffuser(nn.Module):
                 out = F.pad(out, (0, pad_t, 0, pad_f))
             out = out[..., :F_in, :T_in]
 
-        out = out * self.out_gain  # (B,4,F,T) scaled per channel
+        out = out * self.out_gain
 
-        # residual: predict v_hat and s_map or s_scalar
-        if self.residual_prediction:
-            if self.use_smap:
-                s = self.s_out(out)
-            else:
-                s = s_scalar.view(B, 1, 1, 1)
-            return out, s
-        return out, s_scalar
+        return out
+
+
 
 
 def reinit_projections_orthonormal(model):
@@ -590,7 +441,3 @@ def reinit_projections_orthonormal(model):
         Tp = L // Fp                                       # derive Tp from L
         return tokens, (Fp, Tp)
     model.patch_embed.forward = patched_forward
-
-
-
-
