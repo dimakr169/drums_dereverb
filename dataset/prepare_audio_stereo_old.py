@@ -61,8 +61,8 @@ def process_item(file_path, pre_params, anechoic_path, reverb_path, rir_folder):
         # Create the augmentation pipeline once per chunk
         augment = Compose(
             [
-                TimeStretch(min_rate=0.9, max_rate=1.1, p=0.25),
-                PitchShift(min_semitones=-1, max_semitones=1, p=0.25),
+                TimeStretch(min_rate=0.9, max_rate=1.1, p=0.33),
+                PitchShift(min_semitones=-1, max_semitones=1, p=0.33),
                 SevenBandParametricEQ(min_gain_db=-6.0, max_gain_db=6.0, p=0.5),
             ]
         )

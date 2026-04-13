@@ -4,6 +4,7 @@ import os, io, math
 import librosa
 import torch
 import torch.nn as nn
+import torch.backends.cuda as cuda
 import numpy as np
 import pyloudnorm as pyln
 import matplotlib.pyplot as plt
@@ -16,6 +17,7 @@ from types import SimpleNamespace
 from backbones.unet_stereo import UNetRI
 from backbones.dit_stereo import TransformerDiffuser
 from backbones.dit_stereo2 import TransformerDiffuser as TransformerDiffuser2
+
 
 
 
@@ -53,7 +55,7 @@ def build_model_from_entry(entry):
     elif arch == "dit":
         model = TransformerDiffuser(cfg)
         #model = torch.compile(TransformerDiffuser(cfg), mode="reduce-overhead", fullgraph=False)
-    elif arch == "dit2":
+    elif arch == "dit2" or arch == "dit3":
         model = TransformerDiffuser2(cfg)
         #model = torch.compile(TransformerDiffuser(cfg), mode="reduce-overhead", fullgraph=False)
     else:
@@ -608,17 +610,132 @@ class ColdDiffInferencer_var:
         return x  
 
     @torch.inference_mode()
-    def dereverb_batch(self, reverb_ri, reverse_steps: int = None):
+    def dereverb_batch(self, reverb_ri, reverse_steps: int = None, solver: str = None):
         self.model.eval()
         use_amp = self.device.startswith("cuda")
         steps = self.reverse_steps if reverse_steps is None else int(reverse_steps)
+        solver = self.solver if solver is None else solver
         with torch.cuda.amp.autocast(enabled=use_amp):
-            est_ri = self.reverse_diffusion(reverb_ri, num_steps=steps, solver=self.solver)
+            est_ri = self.reverse_diffusion(reverb_ri, num_steps=steps, solver=solver)
 
         # bring back to float32 outside amp context for ISTFT + metrics
         est_ri = est_ri.float()
         est_wav = self.get_signal_from_RI_stft(est_ri)  # (B,2,T)
         return est_ri, est_wav
+
+
+class ColdDiffInferencer_var2:
+    """
+    Generic cold diffusion inferencer WITH VARIABLE DIFFUSION STEPS for RI spectrograms.
+    Works for UNet or DiT, assuming model(x, t) is defined. NEW EDITION
+    """
+    def __init__(self,
+                 model: nn.Module,
+                 model_type: str,
+                 pre_params,
+                 diffusion_steps: int,
+                 reverse_steps: int,
+                 solver: str,
+                 alpha_mode: str,
+                 cdiff_mode: str,
+                 device: str):
+        
+        self.model = model.to(device)
+        self.model_type = model_type #DiT or UNet
+        self.pre_params = pre_params
+        self.diffusion_steps = diffusion_steps 
+        self.reverse_steps = reverse_steps #variable reverse steps
+        self.solver = solver #euler or heun
+        self.alpha_mode = alpha_mode
+        self.cdiff_mode = cdiff_mode # ony works with 'next_delta_norm', 
+        self.device = device
+
+
+        self.center = pre_params.center
+        self.window = torch.hann_window(pre_params.win, periodic=True, device=device)
+
+    def get_signal_from_RI_stft(self, ri_stft):
+        n_fft = self.pre_params.fft
+        hop = self.pre_params.hop
+        win = self.pre_params.win
+        #length = getattr(self.pre_params, "wave_len", None)
+        length = 88200
+        return istft_from_ri(ri_stft, n_fft=n_fft, hop=hop, win_length=win,
+                             window=self.window, center=self.center, length=length)
+    
+    
+    def reverse_diffusion( #VARIABLE EDITION
+        self,
+        inp_ri: torch.Tensor,
+        num_steps: int = 16,
+        solver: str = "heun",          # "euler" or "heun"
+        eps_a: float = 1e-5,
+        use_math_sdpa: bool = True,    # helps avoid eval-only NaNs in SDPA
+    ):
+        """
+        Variable-step sampler consistent with training:
+        - state evolves in alpha-space
+        - model is conditioned on t_cont = logit(alpha)
+        """
+        x = inp_ri.to(dtype=torch.float32)
+        B = x.size(0)
+        device = x.device
+
+        # alpha grid: start near 0 (reverb) -> near 1 (clean)
+        a_grid = torch.linspace(eps_a, 1.0 - eps_a, steps=num_steps + 1,
+                                device=device, dtype=torch.float32)
+
+        def a_to_time(a: torch.Tensor) -> torch.Tensor:
+            a = a.clamp(eps_a, 1.0 - eps_a)
+            return torch.log(a) - torch.log1p(-a)  # logit(a)
+
+
+        sdpa_ctx = cuda.sdp_kernel(enable_flash=False, enable_mem_efficient=False, enable_math=True) \
+            if (use_math_sdpa and device.type == "cuda") else torch.no_grad()
+
+        with sdpa_ctx:
+            for i in range(num_steps):
+                a_curr = a_grid[i]
+                a_next = a_grid[i + 1]
+                g = (a_next - a_curr).view(1, 1, 1, 1).expand(B, 1, 1, 1)  # positive, FP32
+
+                t_curr = a_to_time(a_curr).expand(B)
+                t_next = a_to_time(a_next).expand(B)
+
+                # v at current alpha
+                v1 = self.model(x, t_curr)
+                if isinstance(v1, (tuple, list)): v1 = v1[0]
+                v1 = v1.float()
+
+                if solver == "euler":
+                    x = x + g * v1
+
+                elif solver == "heun":
+                    x_e = x + g * v1
+                    v2 = self.model(x_e, t_next)
+                    if isinstance(v2, (tuple, list)): v2 = v2[0]
+                    v2 = v2.float()
+                    x = x + g * 0.5 * (v1 + v2)
+
+                else:
+                    raise ValueError("solver must be 'euler' or 'heun'")
+
+        return x  
+
+    @torch.inference_mode()
+    def dereverb_batch(self, reverb_ri, reverse_steps: int = None, solver: str = None):
+        self.model.eval()
+        use_amp = self.device.startswith("cuda")
+        steps = self.reverse_steps if reverse_steps is None else int(reverse_steps)
+        solver = self.solver if solver is None else solver
+        with torch.cuda.amp.autocast(enabled=use_amp):
+            est_ri = self.reverse_diffusion(reverb_ri, num_steps=steps, solver=solver)
+
+        # bring back to float32 outside amp context for ISTFT + metrics
+        est_ri = est_ri.float()
+        est_wav = self.get_signal_from_RI_stft(est_ri)  # (B,2,T)
+        return est_ri, est_wav
+
 
 
 class CDiffuseInferencer:
@@ -1560,8 +1677,10 @@ def ola_reconstruct_torch(segs: torch.Tensor, step: int, orig_len: int):
     Returns: [T, C] torch
     """
     N, C, L = segs.shape
-    w = torch.hann_window(L, periodic=True, device=segs.device, dtype=segs.dtype)  # [L]
-    w = (w ** 2)  # stronger edge suppression
+    # w = torch.hann_window(L, periodic=True, device=segs.device, dtype=segs.dtype)  # [L]
+    # w = (w ** 2)  # stronger edge suppression
+    w = torch.hann_window(L, periodic=False, device=segs.device, dtype=segs.dtype)
+    w = torch.sqrt(torch.clamp(w, min=1e-8))  # constant-power style for 50% overlap
     segs_w = segs * w.view(1, 1, L)
 
     out_len = step * (N - 1) + L

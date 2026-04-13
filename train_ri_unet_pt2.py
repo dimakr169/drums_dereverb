@@ -201,22 +201,22 @@ class ColdRIUNetTrainer:
         self.residual_mode = train_params.residual_mode
 
         # optimizer Adam
-        #self.optimizer = torch.optim.Adam(
-        #    self.model.parameters(),
-        #    lr=float(train_params.learning_rate),
-        #    betas=(train_params.beta1, train_params.beta2),
-        #    eps=train_params.eps,
-        #)
-
-        # optimizer AdamW
-        self.optimizer = torch.optim.AdamW(
+        self.optimizer = torch.optim.Adam(
             self.model.parameters(),
             lr=float(train_params.learning_rate),
             betas=(train_params.beta1, train_params.beta2),
             eps=train_params.eps,
-            weight_decay = train_params.weight_decay,
-            fused=True,   # PyTorch 2.9+ on CUDA
-        )        
+        )
+
+        # optimizer AdamW
+        #self.optimizer = torch.optim.AdamW(
+        #    self.model.parameters(),
+        #    lr=float(train_params.learning_rate),
+        #    betas=(train_params.beta1, train_params.beta2),
+        #    eps=train_params.eps,
+        #    weight_decay = train_params.weight_decay,
+        #    fused=True,   # PyTorch 2.9+ on CUDA
+        #)        
 
         # AMP
         self.scaler = torch.cuda.amp.GradScaler(enabled=(device.startswith("cuda")))
@@ -624,8 +624,8 @@ def main():
     set_global_seed(42, deterministic=False)
 
     parser = argparse.ArgumentParser()
-    parser.add_argument("--data-dir", default="data/out_combined_stereo")
-    parser.add_argument("--model-name", default="CDiff_UNet_s_64ch_att_1248_delta-norm_var-adamW-emb_var")
+    parser.add_argument("--data-dir", default="data/out_combined_stereo_all")
+    parser.add_argument("--model-name", default="CDiff_UNet_s_64ch_att_1248_delta-norm_newdataset")
     parser.add_argument("--gpu", default=1, type=int)
     parser.add_argument("--resume", action="store_true",
                         help="Resume training from latest checkpoint")

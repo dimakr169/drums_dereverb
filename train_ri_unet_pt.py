@@ -18,30 +18,80 @@ class EMAModel:
     def __init__(self, model: nn.Module, decay: float=0.999):
         self.decay = decay
         self.model = model
-        self.shadow = [p.detach().clone() for p in model.parameters() if p.requires_grad]
+        self.shadow = {n: p.detach().clone()
+                       for n, p in model.named_parameters() if p.requires_grad}
         self.backup = None
+
+    @torch.no_grad()
+    def _sync_new_params(self):
+        for n, p in self.model.named_parameters():
+            if p.requires_grad and (n not in self.shadow):
+                self.shadow[n] = p.detach().clone()
+
     @torch.no_grad()
     def update(self):
-        i = 0
-        for p in self.model.parameters():
-            if not p.requires_grad: continue
-            self.shadow[i].mul_(self.decay).add_(p.detach(), alpha=1.0 - self.decay)
-            i += 1
+        self._sync_new_params()
+        for n, p in self.model.named_parameters():
+            if not p.requires_grad: 
+                continue
+            self.shadow[n].mul_(self.decay).add_(p.detach(), alpha=1.0 - self.decay)
+
     @torch.no_grad()
     def apply_shadow(self):
-        self.backup = [p.detach().clone() for p in self.model.parameters() if p.requires_grad]
-        i = 0
-        for p in self.model.parameters():
-            if not p.requires_grad: continue
-            p.data.copy_(self.shadow[i]); i += 1
+        self._sync_new_params()
+        self.backup = {}
+        for n, p in self.model.named_parameters():
+            if not p.requires_grad: 
+                continue
+            self.backup[n] = p.detach().clone()
+            p.data.copy_(self.shadow[n])
+
     @torch.no_grad()
     def restore(self):
-        if self.backup is None: return
-        i = 0
-        for p in self.model.parameters():
-            if not p.requires_grad: continue
-            p.data.copy_(self.backup[i]); i += 1
+        if self.backup is None: 
+            return
+        for n, p in self.model.named_parameters():
+            if not p.requires_grad: 
+                continue
+            p.data.copy_(self.backup[n])
         self.backup = None
+
+    # --- add these two for safe checkpointing ---
+    def state_dict(self):
+        # clone tensors to detach from graph
+        return {n: t.clone() for n, t in self.shadow.items()}
+
+    def load_state_dict(self, state, strict: bool = False):
+        """
+        Supports both dict (new) and list (legacy) formats.
+        If a list is given, it will be matched in the order of named_parameters()
+        filtered by requires_grad.
+        """
+        if isinstance(state, list):
+            # legacy: map list -> current trainable params in order
+            i = 0
+            for n, p in self.model.named_parameters():
+                if not p.requires_grad:
+                    continue
+                if i < len(state):
+                    self.shadow[n] = state[i].detach().clone()
+                    i += 1
+                elif strict:
+                    raise RuntimeError("EMA list shorter than model params.")
+            return
+
+        # new: dict
+        missing = []
+        for n, p in self.model.named_parameters():
+            if not p.requires_grad:
+                continue
+            if n in state:
+                self.shadow[n] = state[n].detach().clone()
+            elif strict:
+                missing.append(n)
+        if strict and missing:
+            raise RuntimeError(f"EMA missing keys: {missing}")
+        
 
 # ---- ISTFT helper: (B,4,F,T)->(B,2,T) ----
 def istft_from_ri(ri, n_fft, hop, win_length, window, center: bool, length: int | None):
@@ -201,12 +251,6 @@ class ColdRIUNetTrainer:
 
         # losses & metrics
         self.l1 = nn.L1Loss()
-        self.nmi_loss = NormalizedMutualInformationLoss(NMILossConfig(
-            bins=384,
-            window_length=1024,
-            hop_length=384,
-            use_db_scale=False,
-        ))
         self.sisdr  = SISDR("si_sdr")
         self.sisdri = SISDRi("si_sdri")
 
@@ -214,6 +258,9 @@ class ColdRIUNetTrainer:
         log_root = os.path.join(self.output_dir, "logs")
         self.tb_train = SummaryWriter(os.path.join(log_root, "train"))
         self.tb_val   = SummaryWriter(os.path.join(log_root, "validation"))
+
+        # ckpt path
+        self.ckpt_path = os.path.join(self.output_dir, "checkpoints", "latest.pt")
 
         # window for ISTFT
         self.center = pre_params.center
@@ -232,6 +279,27 @@ class ColdRIUNetTrainer:
             warmup_initial_lr=train_params.warmup_initial_lr,
             cosine_floor_factor=train_params.cosine_floor_factor,
         )
+
+    def load_checkpoint(self):
+        """Load model, optimizer, scaler, EMA and return (next_epoch, best_loss)."""
+        print(f"Loading checkpoint from: {self.ckpt_path}")
+        ckpt = torch.load(self.ckpt_path, map_location=self.device)
+
+        # <-- NON-STRICT 
+        incompatible = self.model.load_state_dict(ckpt["model"], strict=False)
+        print("Loaded model with non-strict matching.")
+        print("  Missing keys:", incompatible.missing_keys)
+        print("  Unexpected keys:", incompatible.unexpected_keys)
+
+        self.optimizer.load_state_dict(ckpt["optimizer"])
+        self.scaler.load_state_dict(ckpt["scaler"])
+        self.ema.load_state_dict(ckpt["ema"])
+
+        start_epoch = ckpt.get("epoch", 0) + 1
+        best_loss = ckpt.get("best_loss", float("inf"))
+
+        print(f"Resuming from epoch {start_epoch} with best_loss={best_loss:.4f}")
+        return start_epoch, best_loss   
 
     @torch.no_grad()
     def diffusion(self, reverb_ri, clean_ri, noise_level):
@@ -281,43 +349,30 @@ class ColdRIUNetTrainer:
         self.model.train(train)
         with torch.cuda.amp.autocast(enabled=self.device.startswith("cuda")):
             if self.residual_mode == "next_delta_norm":
-                # ✅ Normalized velocity v_t = (x_{t-1}-x_t) / g_t,  g_t = a_{t-1}-a_t  (linear mix only)
+                # Normalized velocity v_t = (x_{t-1}-x_t) / g_t,  g_t = a_{t-1}-a_t  (linear mix only)
                 g = (a_tm1 - a_t).clamp_min(1e-6).view(-1,1,1,1)       # (B,1,1,1)
 
                 est_v   = self.model(noised, timesteps)                # v̂_t
                 est_ri  = noised + g * est_v                           # x̂_{t-1}
                 target_v = (noised_next - noised) / g
-                # Optional per-t weighting to equalize contribution across t:
-                #w = (g / g.mean()).detach()             # normalize
-                # delta_loss = self.l1(est_v * w, target_v * w) * 35.0
-                delta_loss = self.l1(est_v, target_v ) * 35.0
-                noise_loss = self.l1(est_ri, noised_next) * 15.0
-                noise_loss = noise_loss + delta_loss
-            elif self.residual_mode == "clean_residual":
-                # r_t = A - x_t ;  x_{t-1} = x_t + s_t * r̂_t, with s_t = (a_{t-1}-a_t)/(1-a_t)  (linear mix)
-                a_t, a_tm1 = self._levels_for(timesteps)
-                s = ((a_tm1 - a_t) / (1.0 - a_t).clamp_min(1e-6)).view(-1,1,1,1)
 
-                est_r  = self.model(noised, timesteps)                 # r̂_t
-                est_ri = noised + s * est_r                            # x̂_{t-1}
-                target_r = clean_ri - noised
-                # Optional: weight loss by (1 - a_t) to balance steps
-                # w = (1.0 - a_t).view(-1,1,1,1)
-                # noise_loss = self.l1(est_r * w, target_r * w) * 50.0
-                noise_loss = self.l1(est_r, target_r) * 50.0               
+         
+                delta_loss = self.l1(est_v, target_v ) * 0.7 
+                noise_loss = self.l1(est_ri, noised_next) * 0.3 
+                noise_loss = (noise_loss + delta_loss) * 50 #mutiply factor for better loss calculation
+          
             elif self.residual_mode == "direct":
                 est_ri    = self.model(noised, timesteps)                  # x̂_{t-1}
-                noise_loss = self.l1(est_ri, noised_next) * 50.0
+                noise_loss = self.l1(est_ri, noised_next) * 50.0 #mutiply factor for better loss calculation
 
             # Audio-domain MAE
             est_wav = self.get_signal_from_RI_stft(est_ri)       # (B,2,T)
             tar_wav = self.get_signal_from_RI_stft(noised_next)  # ground truth
-            audio_loss = self.l1(est_wav, tar_wav) * 400.0
+            audio_loss = self.l1(est_wav, tar_wav) * 400 # x8 (weight) x50 which is the multiply factor
 
-            # NMI
-            nmi_loss = self.nmi_loss(tar_wav, est_wav)
 
-            loss = noise_loss + nmi_loss + audio_loss
+            # Total loss
+            loss = noise_loss + audio_loss
 
         if train:
             self.optimizer.zero_grad(set_to_none=True)
@@ -338,7 +393,6 @@ class ColdRIUNetTrainer:
             "loss": loss.detach(),
             "noise": noise_loss.detach(),
             "audio": audio_loss.detach(),
-            "nmi": nmi_loss.detach(),
             "est_wav": est_wav.detach(),
             "tar_wav": tar_wav.detach(),
             "inp_wav": inp_wav.detach(),  
@@ -359,15 +413,8 @@ class ColdRIUNetTrainer:
                 g = (a_tm1 - a_t).clamp_min(1e-6).view(-1,1,1,1)
                 v = self.model(x, T)
                 x = x + g * v
-            elif self.residual_mode == "clean_residual":
-                # s_t = (a_{t-1}-a_t)/(1-a_t)
-                a_t   = self.alpha_bar.index_select(0, T)
-                a_tm1 = self.alpha_bar.index_select(0, T-1)
-                s = ((a_tm1 - a_t) / (1.0 - a_t).clamp_min(1e-6)).view(-1,1,1,1)
-                r = self.model(x, T)  # r̂_t
-                x = x + s * r                
-            else:
-                x = self.model(x, T)      # direct x̂_{t-1}
+            elif self.residual_mode == "direct":
+                x = self.model(x, T)      # direct x̂_{t-1}              
 
             xs.append(x)
         return xs  # list of (B,4,F,T)
@@ -404,16 +451,20 @@ class ColdRIUNetTrainer:
                 pred_wav = self.get_signal_from_RI_stft(pred[i:i+1]).squeeze(0).permute(1,0).cpu().numpy()
                 sf.write(os.path.join(val_dir, f"diffused_{t}.wav"), pred_wav, sr)
 
-    def train(self):
+    def train(self, start_epoch: int = 0, best_loss: float | None = None):
         train_size = len(self.train_loader)
         val_size   = len(self.val_loader)
         print(f"Dataset with {train_size} training and {val_size} validation batches")
 
         patience = 0
-        best_loss = float("inf")
-        gstep = 0
+        if best_loss is None:
+            best_loss = float("inf")
 
-        for epoch in range(self.train_params.epochs):
+
+        # roughly continue global step counter (for TB)
+        gstep = start_epoch * len(self.train_loader)
+
+        for epoch in range(start_epoch, self.train_params.epochs):
             print(f"\nStart of epoch {epoch}")
             t0 = time.time()
 
@@ -424,17 +475,16 @@ class ColdRIUNetTrainer:
                 out = self._step(batch, train=True, global_step=gstep)
                 if (b % 300) == 0:
                     print(f"Batch {b:5d} | Noise {out['noise'].item():.4f} "
-                        f"| NMI {out['nmi'].item():.4f} | Audio {out['audio'].item():.4f} ")
+                        f"| Audio {out['audio'].item():.4f} ")
                 # TB per-step
                 self.tb_train.add_scalar("loss/noise", out["noise"].item(), gstep)
-                self.tb_train.add_scalar("loss/nmi",   out["nmi"].item(),   gstep)
                 self.tb_train.add_scalar("loss/audio", out["audio"].item(), gstep)
                 gstep += 1
 
             # ---- Validate with EMA weights ----
             self.ema.apply_shadow()
             self.model.eval()
-            noise_sum = audio_sum = nmi_sum = 0.0
+            noise_sum = audio_sum = 0.0
             n_batches = 0
             self.sisdr.reset(); 
             self.sisdri.reset() 
@@ -444,7 +494,6 @@ class ColdRIUNetTrainer:
                     out = self._step(batch, train=False)
                     noise_sum += out["noise"].item()
                     audio_sum += out["audio"].item()
-                    nmi_sum   += out["nmi"].item()
                     n_batches += 1
                     # SI metrics (stubs)
                     self.sisdr.update(out["clean_wav"], out["est_wav"])
@@ -454,12 +503,10 @@ class ColdRIUNetTrainer:
 
             noise_avg = noise_sum / max(n_batches,1)
             audio_avg = audio_sum / max(n_batches,1)
-            nmi_avg   = nmi_sum   / max(n_batches,1)
-            val_loss  = noise_avg + audio_avg + nmi_avg
+            val_loss  = noise_avg + audio_avg 
 
             # TB per-epoch
             self.tb_val.add_scalar("loss/noise", noise_avg, epoch)
-            self.tb_val.add_scalar("loss/nmi",   nmi_avg,   epoch)
             self.tb_val.add_scalar("loss/audio", audio_avg, epoch)
             self.tb_val.add_scalar("metrics/si_sdr", self.sisdr.result(), epoch)
             self.tb_val.add_scalar("metrics/si_sdri", self.sisdri.result(), epoch)
@@ -467,23 +514,21 @@ class ColdRIUNetTrainer:
 
             print("----")
             print(f"Total Noise MAE Loss {noise_avg:.4f}")
-            print(f"Total NMI Loss      {nmi_avg:.4f}")
             print(f"Total Audio MAE     {audio_avg:.4f}")
             print(f"Overall Val Loss    {val_loss:.4f}")
             print("----")
             print(f"SISDR {self.sisdr.result():.4f} | SISDRi {self.sisdri.result():.4f}")
 
             # early stopping + checkpoint
-            ckpt_path = os.path.join(self.output_dir, "checkpoints", "latest.pt")
             if val_loss < best_loss:
                 torch.save({
                     "epoch": epoch,
                     "model": self.model.state_dict(),
                     "optimizer": self.optimizer.state_dict(),
                     "scaler": self.scaler.state_dict(),
-                    "ema": [t.clone() for t in self.ema.shadow],
+                    "ema": self.ema.state_dict(), 
                     "best_loss": val_loss,
-                }, ckpt_path)
+                }, self.ckpt_path)
                 print("Checkpoint saved.")
                 best_loss = val_loss
                 patience = 0
@@ -519,8 +564,10 @@ def main():
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--data-dir", default="data/out_combined_stereo")
-    parser.add_argument("--model-name", default="CDiff_UNet_s_64ch_att_1248_clean-res_cos2")
-    parser.add_argument("--gpu", default=1, type=int)
+    parser.add_argument("--model-name", default="CR-CDiff_UNet_delta")
+    parser.add_argument("--gpu", default=2, type=int)
+    parser.add_argument("--resume", action="store_true",
+                        help="Resume training from latest checkpoint")
     args = parser.parse_args()
 
     # choose device
@@ -556,7 +603,17 @@ def main():
     out_dir = f"saved_models/{args.model_name}"
     trainer = ColdRIUNetTrainer(model, pre_params, train_params, 
                                 dataloaders, out_dir, device=device)
-    trainer.train()
+    # --- RESUME LOGIC ---
+    start_epoch = 0
+    best_loss = None
+    if args.resume:
+        if os.path.exists(trainer.ckpt_path):
+            start_epoch, best_loss = trainer.load_checkpoint()
+        else:
+            print(f"WARNING: resume flag set but checkpoint not found at {trainer.ckpt_path}. "
+                  f"Starting from scratch.")
+
+    trainer.train(start_epoch=start_epoch, best_loss=best_loss)
 
 if __name__ == "__main__":
     main()

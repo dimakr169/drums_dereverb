@@ -195,16 +195,6 @@ class SDPAttention(nn.Module):
         if rope is not None:
             q, k = rope(q, k)
 
-        # --- Remove for ablation
-        # --- Cosine attention: L2 normalize q,k along dh
-        # eps = 1e-6
-        # q = q / (q.norm(dim=-1, keepdim=True) + eps)
-        # k = k / (k.norm(dim=-1, keepdim=True) + eps)
-
-        # Per-head temperature (broadcast to B,N,dh)
-        # tau = torch.nn.functional.softplus(self.log_tau).view(1, self.h, 1, 1).clamp(max=1.5)  # (1,h,1,1)
-        # q = q * tau * (self.dh ** 0.5)  # keep overall scale similar to SDPA default
-
 
         # Prepare additive bias (B*h,N,N)
         attn_mask = None
@@ -234,21 +224,16 @@ class TransformerBlock(nn.Module):
         self.num_heads = num_heads
         self.res_scale = 1.0 / (2.0 ** 0.5)
 
-        self.norm1 = nn.LayerNorm(embed_dim)
-        self.norm2 = nn.LayerNorm(embed_dim)
+        self.norm1 = nn.LayerNorm(embed_dim, elementwise_affine=False, eps=1e-6)
+        self.norm2 = nn.LayerNorm(embed_dim, elementwise_affine=False, eps=1e-6)
 
         self.attn = SDPAttention(embed_dim, num_heads)
-        # zero-init output proj for AdaLN-zero
-        nn.init.zeros_(self.attn.proj.weight)
-        nn.init.zeros_(self.attn.proj.bias)
 
         self.mlp = nn.Sequential(
             nn.Linear(embed_dim, 4 * embed_dim),
             nn.GELU(),
             nn.Linear(4 * embed_dim, embed_dim),
         )
-        nn.init.zeros_(self.mlp[-1].weight)
-        nn.init.zeros_(self.mlp[-1].bias)
 
         # AdaLN-zero style time conditioning
         def zero_linear(i, o):
@@ -260,11 +245,6 @@ class TransformerBlock(nn.Module):
         self.cond1 = nn.Sequential(nn.SiLU(), zero_linear(embed_dim, 3 * embed_dim))
         self.cond2 = nn.Sequential(nn.SiLU(), zero_linear(embed_dim, 3 * embed_dim))
 
-        # small positive gate bias (like your current code)
-        with torch.no_grad():
-            D = embed_dim
-            self.cond1[-1].bias[2 * D : 3 * D].fill_(0.05)
-            self.cond2[-1].bias[2 * D : 3 * D].fill_(0.05)
 
         self.use_rope = use_rope
         self.rope = RotaryEmbedding(embed_dim // num_heads) if use_rope else None
@@ -273,6 +253,7 @@ class TransformerBlock(nn.Module):
         shift, scale, gate = tproj.chunk(3, dim=-1)   # (B,D) each
         x = x * (1 + scale.unsqueeze(1)) + shift.unsqueeze(1)
         return x, gate
+    
 
     def forward(self, x, t_emb):
         # Self-attention

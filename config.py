@@ -34,7 +34,7 @@ class TrainConfig:
         self.diffusions_steps = 16  #10 default
         self.diffusion_mode = 'linear' # linear, sqrt_pair, sqrt_aggresive
         self.alpha_mode = 'cos2' # poly, cos2, exp, sigmoid
-        self.residual_mode  = 'none'  #next_delta_norm, clean_residual or none (direct spec generation)
+        self.residual_mode  = 'next_delta_norm'  #next_delta_norm, clean_residual or direct (spec generation)
 
         
         # global params

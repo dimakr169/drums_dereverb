@@ -1,11 +1,3 @@
-# -*- coding: utf-8 -*-
-"""
-Created on Thu Jan  4 14:12:49 2024
-
-@author: dimak
-"""
-
-# import tensorflow as tf
 import torch
 
 
@@ -17,7 +9,8 @@ class Config:
         self.inp_type = "wav"  # 'wav' or 'flac'
         self.sr = 44100  # sample rate
         self.dur = 2  # duration in seconds
-        self.lufs = -28.0  # for audio normalizing
+        self.context_dur = 10 # split audio inputs in seconds
+        self.lufs = -24.0  # for audio normalizing
         self.threshold = 0.0001  # for energy threshold
 
         # RIR parameters
@@ -34,7 +27,7 @@ class Config:
         self.min_distance_to_wall = 1.0  # for mic and source positions
 
         # Augmentations
-        self.aug_factor = 3 # apply augmentations for each slice
+        self.aug_factor = 3 # apply augmentations for each context
 
         # stft
         self.hop = 384
@@ -47,12 +40,8 @@ class Config:
 
         # training
         self.rep_type = "ri"
-        # Available representations
-        # 'mag_phase': for cold diffusion UNet with magnitude only
-        # 'ri_mag_phase': for GaGNet with Real and Imaginary Parts enchanced with magnitude and phase
-        # 'ri': for cold diffusion UNet, DCUNet, DCCRN with Real and Imaginary Parts
         self.val_split = 0.2 #0.2 default 0.999 for test set
-        self.batch_size = 6 # 5
+        self.batch_size = 4 # 5
 
     # window factory 
     def window_tensor(self, device="cpu"):

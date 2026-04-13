@@ -14,8 +14,8 @@ class Config:
         """Common for all backbones"""
         self.in_chans = 4          # stereo RI: [L_R, L_I, R_R, R_I] 
         # for SGMSE and CDiffuse baseline in_chans = 8 
-        self.dropout = 0.0  # for DiT 0.0 for UNet 0.1
-        self.continuous_emb = True  # select if time embedding is continuous (only for SGMSE+) or discrete
+        self.dropout = 0.1  # for DiT 0.0 for UNet 0.1
+        self.continuous_emb = False  # select if time embedding is continuous (only for SGMSE+) or discrete
         self.use_ckpt = True # enable gradient checkpointing inside backbones (VRAM saver)
         self.residual_prediction = True #predicting the delta Δ = x_{t-1} - x_t 
                          #usually optimizes better than predicting the absolute x_{t-1}
@@ -23,7 +23,7 @@ class Config:
 
         """UNet (Cold Diffusion)"""
         self.num_res_blocks = 2  # Default: 2
-        self.use_attention = True # Apply attention globally (True or False) False
+        self.use_attention = True # Apply attention in middle (True or False) False
         self.channels = 64  # 32
         self.ch_mult = (1, 2, 4, 8)   # (1, 2, 4, 4)  (1, 2, 4, 8)
         self.ri_inp = True  # if input is Real/Imaginary (True) or Magnintude (False)
@@ -44,14 +44,3 @@ class Config:
         self.time_stride = 4 # set to 8 for 50% overlap in time if you want fewer artifacts. Default 5
         self.pos_embed = "sincos_2d" # "sincos_2d" ignored when use_rope=True
         self.use_rope = True   # set True to enable RotaryEmbedding (1D over tokens)
-
-
-        # ----- new addons -----
-        self.use_conditioner = False # default False
-        self.use_smap = False # default False
-        self.ffn_activation = "gelu"      # "gelu" (current) or "swiglu"
-        self.norm_type = "layernorm"      # "layernorm" (current) or "groupnorm"
-        self.groupnorm_groups = 8         # only used if norm_type == "groupnorm"
-        self.use_adaln = True             # True = keep current AdaLN-zero style cond; False = plain norm
-        self.use_stereo_mask = False      # True = use stereo complex masking interpretation
-        self.shared_stereo_mask = False    # if using mask, share mask across L/R

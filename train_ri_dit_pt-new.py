@@ -6,6 +6,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.tensorboard import SummaryWriter
 from torch.optim.lr_scheduler import CosineAnnealingWarmRestarts, LambdaLR
+import torch.backends.cuda as cuda
 
 # --- import your external libraries ---
 from dataset.stereo_dataset import build_dataloaders  # PyTorch DataLoader
@@ -99,22 +100,6 @@ class EMAModel:
         if strict and missing:
             raise RuntimeError(f"EMA missing keys: {missing}")
 
-
-def project_to_cold_line(x_t, R, a_t, a_tm1, mode="linear", eps=1e-6):
-    if mode == "linear":
-        at  = a_t.view(-1,1,1,1).clamp_min(eps)
-        atm = a_tm1.view(-1,1,1,1).clamp_min(eps)
-        A_hat = (x_t - (1.0 - at) * R) / at
-        return atm * A_hat + (1.0 - atm) * R
-    elif mode == "sqrt_pair":
-        at  = a_t.view(-1,1,1,1).clamp_min(eps)
-        atm = a_tm1.view(-1,1,1,1).clamp_min(eps)
-        A_hat = (x_t - (1.0 - at).sqrt() * R) / at.sqrt()
-        return atm.sqrt() * A_hat + (1.0 - atm).sqrt() * R
-    else:
-        return x_t
-    
-
 # ---- ISTFT helper: (B,4,F,T)->(B,2,T) ----
 def istft_from_ri(ri, n_fft, hop, win_length, window, center: bool, length: int | None):
     # ri: (B,4,F,T) [L_R, L_I, R_R, R_I]
@@ -137,36 +122,6 @@ def istft_from_ri(ri, n_fft, hop, win_length, window, center: bool, length: int 
                            center=center, length=length)
         out = torch.stack([recL, recR], dim=1)  # (B,2,T)
     return out  # keep as fp32 (good for losses)
-
-# ---- alpha schedule: cos^2 in UNet ----
-def make_alpha_bar(diffusion_steps: int, device, kind="poly", power=3.0, beta=5.0, k=8.0):
-    """
-    Returns alpha_bar[0..T] with alpha_bar[0]=1 (clean), alpha_bar[T]=0 (reverb).
-    kind: "poly" (default), "cos2", "exp", "sigmoid"
-    - poly:    alpha = 1 - (t/T)^power              # p>=2 gives steep early, gentle late
-    - cos2:    alpha = cos^2(0.5*pi*t/T)            # gentle to all
-    - exp:     alpha = 1 - exp(-beta*(1 - t/T))     # beta≈3–8, similar shape to poly
-    - sigmoid: alpha = sigmoid(k*(1 - 2*t/T))       # S-shaped; pick k≈6–10
-    """
-    T = diffusion_steps
-    t = torch.arange(T+1, device=device, dtype=torch.float32)  # 0..T
-    x = t / float(T)
-
-    if kind == "poly":
-        a = 1.0 - x.pow(power)
-    elif kind == "cos2":
-        a = torch.cos(0.5 * math.pi * x).pow(2)
-    elif kind == "exp":
-        a = 1.0 - torch.exp(-beta * (1.0 - x))
-    elif kind == "sigmoid":
-        a = torch.sigmoid(k * (1.0 - 2.0 * x))
-    else:
-        raise ValueError(f"Unknown schedule: {kind}")
-
-    # Ensure exact endpoints
-    a[0] = 1.0  # clean
-    a[-1] = 0.0 # reverb
-    return a
 
 
 # ---- LR policies ----
@@ -234,7 +189,7 @@ def build_scheduler(optimizer, policy: str, base_lr: float, steps_per_epoch: int
     # --------------------------------------------------
     raise ValueError(f"Unknown lr_policy: {policy}")
 
-# ---- Trainer Torch version ----
+# ---- Trainer Variable version ----
 class ColdDiffTransformerTrainer: 
     def __init__(self, model, pre_params, train_params, model_params, dataloaders, output_dir, device="cuda"):
         self.model = model.to(device)
@@ -253,15 +208,6 @@ class ColdDiffTransformerTrainer:
         self.alpha_mode = train_params.alpha_mode
         self.residual_mode = model_params.residual_prediction
 
-        # stereo mask options (mirrors model config)
-        self.use_stereo_mask = model_params.use_stereo_mask
-        self.shared_stereo_mask = model_params.shared_stereo_mask 
-
-
-        # alpha_bar[0..T]
-        self.alpha_bar = make_alpha_bar(self.diffusion_steps, device=self.device, kind=self.alpha_mode)
-        self.current_epoch = 0  # initializer for epoch
-
         # optimizer
         self.optimizer = torch.optim.AdamW(
             self.model.parameters(),
@@ -273,21 +219,19 @@ class ColdDiffTransformerTrainer:
         )
 
         # AMP
-        use_amp = self.device.startswith("cuda") and False  # DEBUG: disable AMP
-        self.use_amp = use_amp
-        self.scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
+        self.scaler = torch.cuda.amp.GradScaler(enabled=(device.startswith("cuda")))
 
         # EMA
         self.ema = EMAModel(self.model, decay=train_params.ema_decay)
 
         # losses & metrics
         self.l1 = nn.L1Loss()
-        self.nmi_loss = NormalizedMutualInformationLoss(NMILossConfig(
-            bins=384,
-            window_length=1024,
-            hop_length=384,
-            use_db_scale=False,
-        ))
+        #self.nmi_loss = NormalizedMutualInformationLoss(NMILossConfig(
+        #    bins=384,
+        #    window_length=1024,
+        #    hop_length=384,
+        #    use_db_scale=False,
+        #))
         self.sisdr  = SISDR("si_sdr")
         self.sisdri = SISDRi("si_sdri")
 
@@ -317,7 +261,6 @@ class ColdDiffTransformerTrainer:
             cosine_floor_factor=train_params.cosine_floor_factor,
         )
 
-
     @torch.no_grad()
     def diffusion(self, reverb_ri, clean_ri, noise_level):
         # noise_level a_t in [0,1], shape (B,)
@@ -330,7 +273,6 @@ class ColdDiffTransformerTrainer:
             return a * clean_ri + (1.0 - torch.sqrt(a)) * reverb_ri
         else:
             raise ValueError(f"Unknown diffusion_mode {self.diffusion_mode}")
-        
 
     def get_signal_from_RI_stft(self, ri_stft):
         # ri_stft: (B,4,F,T) -> (B,2,T)
@@ -346,7 +288,7 @@ class ColdDiffTransformerTrainer:
         print(f"Loading checkpoint from: {self.ckpt_path}")
         ckpt = torch.load(self.ckpt_path, map_location=self.device)
 
-        # <-- NON-STRICT load to ignore _relpos.raw_f / raw_t / log_scale
+        # <-- NON-STRICT 
         incompatible = self.model.load_state_dict(ckpt["model"], strict=False)
         print("Loaded model with non-strict matching.")
         print("  Missing keys:", incompatible.missing_keys)
@@ -361,76 +303,104 @@ class ColdDiffTransformerTrainer:
 
         print(f"Resuming from epoch {start_epoch} with best_loss={best_loss:.4f}")
         return start_epoch, best_loss    
+
+    def alpha_continuous(self, t: torch.Tensor) -> torch.Tensor:
+        """
+        Continuous alpha(t) matching make_alpha_bar() shapes, for float t in [0, T_train].
+        Returns a(t) in [0,1] with a(0)=1, a(T)=0.
+        """
+        T = float(self.diffusion_steps)
+        x = (t / T).clamp(0.0, 1.0)
+
+        kind = self.alpha_mode
+        if kind == "poly":
+            power = 3.0
+            a = 1.0 - x.pow(power)
+        elif kind == "cos2":
+            a = torch.cos(0.5 * math.pi * x).pow(2)
+        elif kind == "exp":
+            beta = 5.0
+            a = 1.0 - torch.exp(-beta * (1.0 - x))
+        elif kind == "sigmoid":
+            k = 8.0
+            a = torch.sigmoid(k * (1.0 - 2.0 * x))
+        else:
+            raise ValueError(f"Unknown schedule: {kind}")
+
+        return a.clamp(0.0, 1.0)
+
+
+    def _random_a_and_da(self, bsize: int, n_min: int = 4, n_max: int = 64):
+        # sample a in (0,1]
+        a = torch.rand(bsize, device=self.device) * (1.0 - 1e-3) + 1e-3  # (B,)
+        # sample da in [1/n_max, 1/n_min]
+        da = torch.rand(bsize, device=self.device) * ((1.0 / n_min) - (1.0 / n_max)) + (1.0 / n_max)
+        a_next = (a + da).clamp_max(1.0)
+        return a, a_next  
     
+    def _a_to_time(self, a: torch.Tensor) -> torch.Tensor:
+        eps = 1e-5
+        a = a.clamp(eps, 1.0 - eps)
+        return torch.log(a) - torch.log1p(-a)   # logit(a)
 
-    def _random_timesteps(self, bsize):
-        # Uniform integers in [1, T]
-        return torch.randint(low=1, high=self.diffusion_steps+1, size=(bsize,), device=self.device)
-
-
-    def _levels_for(self, t):
-        # returns (alpha_t, alpha_{t-1}) as (B,)
-        a_t = self.alpha_bar.index_select(0, t)
-        a_tm1 = self.alpha_bar.index_select(0, t-1)
-        return a_t, a_tm1
-
-    def _step(self, batch, train=True, global_step=0):
-        reverb_ri, clean_ri = batch  # from DataLoader: (B,4,F,T)
+    #Residual Mode only
+    def _step(self, batch, train=True, global_step=0, use_amp=True):
+        reverb_ri, clean_ri = batch
         reverb_ri = reverb_ri.to(self.device, non_blocking=True)
         clean_ri  = clean_ri.to(self.device, non_blocking=True)
 
         bsize = reverb_ri.shape[0]
-        # timesteps = self._random_timesteps(bsize, epoch=self.current_epoch)  # (B,)
-        timesteps = self._random_timesteps(bsize)  # (B,)
-        a_t, a_tm1 = self._levels_for(timesteps)
 
-        noised      = self.diffusion(reverb_ri, clean_ri, a_t)
-        noised_next = self.diffusion(reverb_ri, clean_ri, a_tm1)
+        # 1) sample alpha levels directly to control effective #steps
+        a_t, a_next = self._random_a_and_da(bsize, n_min=4, n_max=64)  # (B,), (B,)
+
+
+        # 2) forward diffusion at both levels (linear mix)
+        x_t    = self.diffusion(reverb_ri, clean_ri, a_t)
+        x_next = self.diffusion(reverb_ri, clean_ri, a_next)
+
+        # 3) step size in alpha space
+        g = (a_next - a_t).view(-1, 1, 1, 1).float()            # (B,1,1,1)
+
+        # 4) continuous conditioning scalar for embedding
+        t_cont = self._a_to_time(a_t)  # logit(a_t), shape (B,)
 
         self.model.train(train)
-        with torch.cuda.amp.autocast(enabled=self.use_amp):
-            if self.residual_mode:
-                # ✅ Normalized velocity v_t = (x_{t-1}-x_t) / g_t,  g_t = a_{t-1}-a_t  (linear mix only)
-                g = (a_tm1 - a_t).clamp_min(1e-6).view(-1,1,1,1)       # (B,1,1,1)
-                est_v = self.model(noised, timesteps)                # v̂_t
-                est_ri  = noised + g * est_v                           # x̂_{t-1}
-                target_v = (noised_next - noised) / g
-                # Optional per-t weighting to equalize contribution across t:
-                w = (g / g.mean()).detach()             # normalize
-                delta_loss = self.l1(est_v * w, target_v * w) * 35.0
-                # delta_loss = self.l1(est_v, target_v ) * 35.0
-                noise_loss = self.l1(est_ri, noised_next) * 15.0
-                noise_loss = noise_loss + delta_loss       
+        with torch.cuda.amp.autocast(enabled=(use_amp and self.device.startswith("cuda"))):
+            # 5) predict velocity field v
+            v_hat = self.model(x_t, t_cont)
 
-            else:
-                #NOT USING IT
-                est_ri, _ = self.model(noised, timesteps, sc=sc_tensor)
+        # 6) one-step prediction for that random dt
+        v_hat = v_hat.float()  #FP32
+        x_hat_next = x_t.float() + g * v_hat
 
+        # 7) target v is consistent for any dt:
+        # v_target = ((x_next - x_t) / g).float()
+        # linear diffusion => dt-invariant velocity target
+        v_target = (clean_ri - reverb_ri).float()
 
-            # Audio-domain MAE
-            est_wav = self.get_signal_from_RI_stft(est_ri)       # (B,2,T)
-            tar_wav = self.get_signal_from_RI_stft(noised_next)  # ground truth
-            audio_loss = self.l1(est_wav, tar_wav) * 400.0
+        # losses (keep your original spirit, just with continuous t/dt)
+        delta_loss = self.l1(v_hat, v_target) * 35.0
+        noise_loss = self.l1(x_hat_next, x_next.float()) * 15.0
+        noise_loss = noise_loss + delta_loss
 
-            # NMI
-            nmi_loss = self.nmi_loss(tar_wav, est_wav)         
+        # ISTFT + audio loss in FP32 only
+        est_wav = self.get_signal_from_RI_stft(x_hat_next.float())
+        tar_wav = self.get_signal_from_RI_stft(x_next.float())
 
-            loss = noise_loss + nmi_loss + audio_loss
-            # loss = noise_loss + audio_loss
+        audio_loss = self.l1(est_wav, tar_wav) * 400.0
+        # nmi_loss   = self.nmi_loss(tar_wav, est_wav)
+
+        loss = noise_loss + audio_loss
 
         if train:
             self.optimizer.zero_grad(set_to_none=True)
-            if self.use_amp:
-                self.scaler.scale(loss).backward()
-                # Unscale gradients *before* clipping
-                self.scaler.unscale_(self.optimizer)
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)  #residual 0.5
-                self.scaler.step(self.optimizer)
-                self.scaler.update()
-            else:
-                loss.backward()
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
-                self.optimizer.step()                
+            self.scaler.scale(loss).backward()
+            # AMP-safe clipping
+            self.scaler.unscale_(self.optimizer)
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)  # optional
+            self.scaler.step(self.optimizer)
+            self.scaler.update()
             self.ema.update()
             if self.scheduler is not None:
                 self.scheduler.step()
@@ -444,8 +414,7 @@ class ColdDiffTransformerTrainer:
             "loss": loss.detach(),
             "noise": noise_loss.detach(),
             "audio": audio_loss.detach(),
-            "nmi": nmi_loss.detach(),
-            # "reg": vel_reg.detach(),
+            # "nmi": nmi_loss.detach(),
             "est_wav": est_wav.detach(),
             "tar_wav": tar_wav.detach(),
             "inp_wav": inp_wav.detach(),  
@@ -453,35 +422,66 @@ class ColdDiffTransformerTrainer:
         }
 
     @torch.no_grad()
-    def reverse_diffusion(self, inp_ri, step_stop=0, max_ratio=0.2):
+    def reverse_diffusion_variable(
+        self,
+        inp_ri: torch.Tensor,
+        num_steps: int = 16,
+        solver: str = "heun",          # "euler" or "heun"
+        eps_a: float = 1e-5,
+        use_math_sdpa: bool = True,    # helps avoid eval-only NaNs in SDPA
+    ):
         """
-        Run full reverse chain x_T -> x_{step_stop}.
-        - If residual_prediction=True: model returns (v_hat, s); we update x <- x + (s*g)*v_hat.
-        - If residual_prediction=False: model returns (x_hat_tm1, s); we optionally feed self-conditioning.
+        Variable-step sampler consistent with training:
+        - state evolves in alpha-space
+        - model is conditioned on t_cont = logit(alpha)
         """
-        bsize = inp_ri.shape[0]
-        x = inp_ri
+        x = inp_ri.to(dtype=torch.float32)
+        B = x.size(0)
+        device = x.device
+
+        # alpha grid: start near 0 (reverb) -> near 1 (clean)
+        a_grid = torch.linspace(eps_a, 1.0 - eps_a, steps=num_steps + 1,
+                                device=device, dtype=torch.float32)
+
+        def a_to_time(a: torch.Tensor) -> torch.Tensor:
+            a = a.clamp(eps_a, 1.0 - eps_a)
+            return torch.log(a) - torch.log1p(-a)  # logit(a)
+
         xs = []
-        sc = None  # for direct mode self-conditioning
 
-        for t in range(self.diffusion_steps, step_stop, -1):
-            T = torch.full((bsize,), t, device=self.device, dtype=torch.long)
-            a_t   = self.alpha_bar.index_select(0, T)          # (B,)
-            a_tm1 = self.alpha_bar.index_select(0, T - 1)      # (B,)
-            g = (a_tm1 - a_t).clamp_min(1e-6).view(-1,1,1,1)       # (B,1,1,1)
-            if self.residual_mode:
-                #UNet Style
-                v = self.model(x, T)
-                x = x + g * v
+        sdpa_ctx = cuda.sdp_kernel(enable_flash=False, enable_mem_efficient=False, enable_math=True) \
+            if (use_math_sdpa and device.type == "cuda") else torch.no_grad()
 
-            else:
-                #NOT USING IT-
-                x_hat_pred, _ = self.model(x, T, sc=sc)
+        with sdpa_ctx:
+            for i in range(num_steps):
+                a_curr = a_grid[i]
+                a_next = a_grid[i + 1]
+                g = (a_next - a_curr).view(1, 1, 1, 1).expand(B, 1, 1, 1)  # positive, FP32
 
-                x = x_hat_pred     
+                t_curr = a_to_time(a_curr).expand(B)
+                t_next = a_to_time(a_next).expand(B)
 
-            xs.append(x)
-        return xs  # list of (B,4,F,T)
+                # v at current alpha
+                v1 = self.model(x, t_curr)
+                if isinstance(v1, (tuple, list)): v1 = v1[0]
+                v1 = v1.float()
+
+                if solver == "euler":
+                    x = x + g * v1
+
+                elif solver == "heun":
+                    x_e = x + g * v1
+                    v2 = self.model(x_e, t_next)
+                    if isinstance(v2, (tuple, list)): v2 = v2[0]
+                    v2 = v2.float()
+                    x = x + g * 0.5 * (v1 + v2)
+
+                else:
+                    raise ValueError("solver must be 'euler' or 'heun'")
+
+                xs.append(x)
+
+        return xs
 
     @torch.no_grad()
     def generate_random_batch(self, epoch):
@@ -498,12 +498,13 @@ class ColdDiffTransformerTrainer:
 
         # swap-in EMA weights for generation
         self.ema.apply_shadow()
-        preds = self.reverse_diffusion(inp_ri)  # list of (B,4,F,T)
+        preds = self.reverse_diffusion_variable(inp_ri, num_steps=self.diffusion_steps, solver="heun")
+        # preds = self.reverse_diffusion_variable(inp_ri, num_steps=4, solver="heun")
         self.ema.restore()
 
         # save first N examples per batch
         sr = getattr(self.pre_params, "sr", 44100)
-        Bsave = min(8, reverb_ri.shape[0])
+        Bsave = min(5, reverb_ri.shape[0])
         for i in range(Bsave):
             val_dir = os.path.join(out_root, f"val_{i}")
             os.makedirs(val_dir, exist_ok=True)
@@ -514,7 +515,6 @@ class ColdDiffTransformerTrainer:
             for t, pred in enumerate(preds):
                 pred_wav = self.get_signal_from_RI_stft(pred[i:i+1]).squeeze(0).permute(1,0).cpu().numpy()
                 sf.write(os.path.join(val_dir, f"diffused_{t}.wav"), pred_wav, sr)
-
 
     def train(self, start_epoch: int = 0, best_loss: float | None = None):
         train_size = len(self.train_loader)
@@ -532,7 +532,6 @@ class ColdDiffTransformerTrainer:
         for epoch in range(start_epoch, self.train_params.epochs):
             print(f"\nStart of epoch {epoch}")
             t0 = time.time()
-            self.current_epoch = epoch  
 
             # ---- Train ----
             self.model.train(True)
@@ -541,43 +540,38 @@ class ColdDiffTransformerTrainer:
                 out = self._step(batch, train=True, global_step=gstep)
                 if (b % 300) == 0:
                     print(f"Batch {b:5d} | Noise {out['noise'].item():.4f} "
-                        f"| NMI {out['nmi'].item():.4f} | Audio {out['audio'].item():.4f} ")
+                        f"| Audio {out['audio'].item():.4f} ")
                 # TB per-step
                 self.tb_train.add_scalar("loss/noise", out["noise"].item(), gstep)
-                self.tb_train.add_scalar("loss/nmi",   out["nmi"].item(),   gstep)
                 self.tb_train.add_scalar("loss/audio", out["audio"].item(), gstep)
                 gstep += 1
 
             # ---- Validate with EMA weights ----
             self.ema.apply_shadow()
             self.model.eval()
-            noise_sum = audio_sum = nmi_sum = 0.0
+            noise_sum = audio_sum = 0.0
             n_batches = 0
             self.sisdr.reset(); 
             self.sisdri.reset() 
 
             with torch.no_grad():
                 for batch in self.val_loader:
-                    out = self._step(batch, train=False)
+                    out = self._step(batch, train=False, use_amp=False)
                     noise_sum += out["noise"].item()
                     audio_sum += out["audio"].item()
-                    nmi_sum   += out["nmi"].item()
                     n_batches += 1
                     # SI metrics (stubs)
                     self.sisdr.update(out["clean_wav"], out["est_wav"])
                     self.sisdri.update(out["clean_wav"], out["est_wav"], out["inp_wav"]) 
-
+                    
             self.ema.restore()
-            #self.ema.decay = min(0.9995, 0.98 + 0.004 * self.current_epoch)
 
             noise_avg = noise_sum / max(n_batches,1)
             audio_avg = audio_sum / max(n_batches,1)
-            nmi_avg   = nmi_sum   / max(n_batches,1)
-            val_loss  = noise_avg + audio_avg + nmi_avg
+            val_loss  = noise_avg + audio_avg 
 
             # TB per-epoch
             self.tb_val.add_scalar("loss/noise", noise_avg, epoch)
-            self.tb_val.add_scalar("loss/nmi",   nmi_avg,   epoch)
             self.tb_val.add_scalar("loss/audio", audio_avg, epoch)
             self.tb_val.add_scalar("metrics/si_sdr", self.sisdr.result(), epoch)
             self.tb_val.add_scalar("metrics/si_sdri", self.sisdri.result(), epoch)
@@ -585,7 +579,6 @@ class ColdDiffTransformerTrainer:
 
             print("----")
             print(f"Total Noise MAE Loss {noise_avg:.4f}")
-            print(f"Total NMI Loss      {nmi_avg:.4f}")
             print(f"Total Audio MAE     {audio_avg:.4f}")
             print(f"Overall Val Loss    {val_loss:.4f}")
             print("----")
@@ -598,7 +591,7 @@ class ColdDiffTransformerTrainer:
                     "model": self.model.state_dict(),
                     "optimizer": self.optimizer.state_dict(),
                     "scaler": self.scaler.state_dict(),
-                    "ema": self.ema.state_dict(),
+                    "ema": self.ema.state_dict(), 
                     "best_loss": val_loss,
                 }, self.ckpt_path)
                 print("Checkpoint saved.")
@@ -635,9 +628,9 @@ def main():
     set_global_seed(42, deterministic=False)
 
     parser = argparse.ArgumentParser()
-    parser.add_argument("--data-dir", default="data/out_combined_stereo")
-    parser.add_argument("--model-name", default="CDiff_DiT_s_768d-8h_5l_cos2_19_9_s4_temb")
-    parser.add_argument("--gpu", default=2, type=int)
+    parser.add_argument("--data-dir", default="data/out_combined_stereo_all")
+    parser.add_argument("--model-name", default="CDiff_DiT_s_768d-8h_5l_cos2_19_9_s4_var_noemb_newdata")
+    parser.add_argument("--gpu", default=1, type=int)
     parser.add_argument("--resume", action="store_true",
                         help="Resume training from latest checkpoint")
     args = parser.parse_args()
@@ -674,7 +667,7 @@ def main():
 
     # trainer
     out_dir = f"saved_models/{args.model_name}"
-    trainer = ColdDiffTransformerTrainer(model, pre_params, train_params, model_params, 
+    trainer = ColdDiffTransformerTrainer(model, pre_params, train_params, model_params,
                                     dataloaders, out_dir, device=device)
     # --- RESUME LOGIC ---
     start_epoch = 0
@@ -687,7 +680,6 @@ def main():
                   f"Starting from scratch.")
 
     trainer.train(start_epoch=start_epoch, best_loss=best_loss)
-
 
 if __name__ == "__main__":
     main()
