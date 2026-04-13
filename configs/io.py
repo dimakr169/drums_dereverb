@@ -62,8 +62,6 @@ def _validate_config(cfg: dict) -> None:
     if opt_name not in {"adam", "adamw"}:
         raise ValueError("train.optimizer.name must be 'adam' or 'adamw'.")
 
-    if cfg["data"]["rep_type"] != "ri":
-        raise ValueError("This refactor currently supports only data.rep_type='ri'.")
 
 
 def load_config(path: str | Path):

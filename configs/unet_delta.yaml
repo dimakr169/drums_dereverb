@@ -1,42 +1,32 @@
 experiment:
-  name: CR-CDiff_UNet_delta
-  output_dir: saved_models/CR-CDiff_UNet_delta
+  name: CDiff_UNet_delta_exp
+  output_dir: saved_models/CDiff_UNet_delta_test
   seed: 42
 
 runtime:
-  data_dir: data/out_combined_stereo
-  gpu: 0
-  resume: false
+  data_dir: data/out_combined_stereo #dataset path
+  gpu: 1
   amp: true
   cudnn_benchmark: true
   allow_tf32: false
   matmul_precision: high
-  print_every: 300
+
 
 data:
-  inp_type: wav
+  inp_type: wav # flac may not work without modifications
   sr: 44100
-  dur: 2
-  context_dur: 10
-  lufs: -24.0
-  threshold: 0.0001
-  t60_r: [0.4, 1.5]
-  room_dim_r: [5, 15, 5, 15, 2, 6]
-  min_distance_to_wall: 1.0
-  aug_factor: 3
   hop: 384
   win: 1024
   fft: 1024
   win_fn: hann
   center: true
-  rep_type: ri
   val_split: 0.2
-  batch_size: 4
+  batch_size: 2
 
 train:
   epochs: 200
-  patience: 7
-  gen_val_batch: true
+  patience: 7 # for early stopping 
+  gen_val_batch: true # for generating a random validation batch
 
   learning_rate: 1.0e-4
   beta1: 0.9
@@ -51,6 +41,7 @@ train:
     fused: false
 
   lr_policy: fixed
+  # for warmup cosine etc
   warmup_steps: 2000
   restart_epochs: 30
   warmup_initial_lr: 1.0e-6
@@ -63,11 +54,10 @@ train:
   residual_mode: next_delta_norm
 
   loss:
-    delta_weight: 35.0
-    recon_weight: 15.0
-    spec_weight: 50.0
-    audio_weight: 400.0
-    timestep_reweight: false
+    delta_weight: 0.7
+    recon_weight: 0.3
+    audio_weight: 8.0
+    multiply_factor : 50.0 # mutiply factor for better loss calculation
 
 model:
   backbone: unet
@@ -79,10 +69,9 @@ model:
   residual_prediction: true
 
   num_res_blocks: 2
-  use_attention: true
+  use_attention: true # Bottleneck attention
   channels: 64
   ch_mult: [1, 2, 4, 8]
-  ri_inp: true
-  use_norm: true
+  use_norm: true # Usage of BN or GN layers in Residual blocks
   num_groups: 8
-  resample_with_conv: true
+  resample_with_conv: true # Dowsampling with conv2d

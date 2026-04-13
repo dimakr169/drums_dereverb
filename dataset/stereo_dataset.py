@@ -4,7 +4,7 @@ from typing import List
 import numpy as np
 import torch
 import soundfile as sf
-from torch.utils.data import Dataset, DataLoader, random_split
+from torch.utils.data import Dataset, DataLoader
 
 
 def make_or_load_split(all_files, split_dir, val_ratio=0.2, seed=42):
@@ -52,7 +52,7 @@ def split_paths(all_files, val_ratio: float = 0.2, seed: int = 42):
 
 
 
-class AD2Stereo(Dataset):
+class RIStereo(Dataset):
     """
       - Loads pairs (reverb, anechoic)
       - Builds RI STFTs
@@ -66,11 +66,28 @@ class AD2Stereo(Dataset):
     def __init__(self, config, data_dir, file_list: List[str]):
         self.config = config
         self.data_dir = data_dir
-        # keep exactly your mapping: list of (reverb_path, anechoic_path)
+        # list of (reverb_path, anechoic_path)
         self.pairs = [(p, p.replace("reverb", "anechoic")) for p in file_list]
 
         # Prepare window once (on CPU; moved to device inside __getitem__ as needed)
         self._window = None  # lazy; created on first __getitem__
+
+    def _window_tensor(self, device="cpu"):
+        if self.config.win_fn == "hann":
+            return torch.hann_window(
+                self.config.win,
+                periodic=True,
+                device=device,
+                dtype=torch.float32,
+            )
+        elif self.config.win_fn == "hamming":
+            return torch.hamming_window(
+                self.config.win,
+                periodic=True,
+                device=device,
+                dtype=torch.float32,
+            )
+        raise ValueError(f"invalid window function: {self.config.win_fn}")
 
     @staticmethod
     def _decode_audio(path: str, expected_type: str, sr: int) -> np.ndarray:
@@ -79,10 +96,10 @@ class AD2Stereo(Dataset):
           - flac: via soundfile (supported if libsndfile is built with flac)
         Returns float32 in [-1, 1], shape (T,) or (T, C).
         """
-        # soundfile returns float64 by default; always cast to float32
+
         audio, file_sr = sf.read(path, always_2d=False, dtype="float32")
         # shape handling: soundfile gives (T,) for mono or (T, C) for stereo
-        # Resampling: assume dataset is at config.sr.
+
         if file_sr != sr:
             raise ValueError(f"Found sr={file_sr} in {path}, expected {sr}. Add resampling if needed.")
         return audio  # float32
@@ -112,10 +129,10 @@ class AD2Stereo(Dataset):
         """
         # lazy build window on the same device
         if self._window is None or self._window.device.type != device:
-            self._window = self.config.window_tensor(device=device)
+            self._window = self._window_tensor(device=device)
 
         wav = torch.from_numpy(wav_np).to(device)  # (T, 2)
-        # torch.stft expects (T,) or (B,T); we’ll do per-channel then stack.
+        # torch.stft expects (T,) or (B,T) so per-channel and then stack.
         n_fft = self.config.fft
         hop = self.config.hop
         win = self.config.win
@@ -166,14 +183,7 @@ class AD2Stereo(Dataset):
         x_rev = self._ensure_stereo(x_rev)  # (T,2)
         x_dry = self._ensure_stereo(x_dry)  # (T,2)
 
-        # (Optional) duration cropping like TF (if you used it later in pipeline)
-        # samples = int(self.config.dur * self.config.sr)
-        # if x_rev.shape[0] >= samples:
-        #     x_rev = x_rev[:samples]
-        #     x_dry = x_dry[:samples]
-
         # --- compute RI spectrograms (C=4, F, T) ---
-        # Compute on CPU here; you can move to GPU in the training loop.
         inp_ri = self._compute_ri(x_rev, device="cpu")
         tar_ri = self._compute_ri(x_dry, device="cpu")
 
@@ -194,9 +204,8 @@ def build_dataloaders(config, data_dir, seed: int = 42, num_workers: int = 4, pi
     split_dir = os.path.join(data_dir, "_splits_ri_stereo")  # any folder you like
     train_files, val_files = make_or_load_split(all_files, split_dir, config.val_split, seed)
 
-    train_ds = AD2Stereo(config, data_dir, train_files)
-    val_ds   = AD2Stereo(config, data_dir, val_files)
-    # val_ds   = AD2Stereo(config, data_dir, train_files[:10])
+    train_ds = RIStereo(config, data_dir, train_files[:10])
+    val_ds   = RIStereo(config, data_dir, val_files[:10])
 
     # reproducible worker seeding
     def seed_worker(worker_id):
