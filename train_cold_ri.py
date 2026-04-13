@@ -382,8 +382,13 @@ class ColdRITrainer:
         hop = self.pre_params.hop
         win = self.pre_params.win
         length = getattr(self.pre_params, "wave_len", None)  # optional; or infer externally
+
+        window = self.window
+        if window.device != ri_stft.device:
+            window = window.to(ri_stft.device)
+
         return istft_from_ri(ri_stft, n_fft=n_fft, hop=hop, win_length=win,
-                             window=self.window, center=self.center, length=length)
+                             window=window, center=self.center, length=length)
 
     def _random_timesteps(self, bsize):
         # Uniform integers in [1, T]

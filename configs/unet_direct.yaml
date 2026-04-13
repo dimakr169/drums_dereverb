@@ -1,11 +1,11 @@
 experiment:
-  name: CDiff_UNet_delta
-  output_dir: saved_models/CDiff_UNet_delta
+  name: CDiff_UNet_direct
+  output_dir: saved_models/CDiff_UNet_direct_e
   seed: 42
 
 runtime:
   data_dir: data/out_combined_stereo #dataset path
-  gpu: 0
+  gpu: 1
   amp: true
   cudnn_benchmark: true
   allow_tf32: false
@@ -51,11 +51,9 @@ train:
   diffusion_steps: 16
   diffusion_mode: linear
   alpha_mode: cos2
-  residual_mode: next_delta_norm
+  residual_mode: direct # direct spectrogram generation
 
   loss:
-    delta_weight: 0.7
-    recon_weight: 0.3
     audio_weight: 8.0
     multiply_factor : 50.0 # mutiply factor for better loss calculation
 
@@ -65,7 +63,7 @@ model:
   in_chans: 4
   dropout: 0.1
   continuous_emb: false
-  residual_prediction: true
+  residual_prediction: false
 
   num_res_blocks: 2
   use_attention: true # Bottleneck attention

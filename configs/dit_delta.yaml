@@ -1,37 +1,26 @@
 experiment:
-  name: CR-CDiff_DiT_delta
-  output_dir: saved_models/CR-CDiff_DiT_delta
+  name: CDiff_DiT_delta
+  output_dir: saved_models/CDiff_DiT_delta
   seed: 42
 
 runtime:
-  data_dir: data/out_combined_stereo
+  data_dir: data/out_combined_stereo # dataset path
   gpu: 0
-  resume: false
   amp: true
   cudnn_benchmark: true
   allow_tf32: true
   matmul_precision: high
-  print_every: 300
 
 data:
-  inp_type: wav
+  inp_type: wav # flac may not work without modifications
   sr: 44100
-  dur: 2
-  context_dur: 10
-  lufs: -24.0
-  threshold: 0.0001
-  t60_r: [0.4, 1.5]
-  room_dim_r: [5, 15, 5, 15, 2, 6]
-  min_distance_to_wall: 1.0
-  aug_factor: 3
   hop: 384
   win: 1024
   fft: 1024
   win_fn: hann
   center: true
-  rep_type: ri
   val_split: 0.2
-  batch_size: 4
+  batch_size: 8
 
 train:
   epochs: 200
@@ -51,6 +40,7 @@ train:
     fused: true
 
   lr_policy: fixed
+  # for warmup cosine etc
   warmup_steps: 2000
   restart_epochs: 30
   warmup_initial_lr: 1.0e-6
@@ -60,14 +50,13 @@ train:
   diffusion_steps: 16
   diffusion_mode: linear
   alpha_mode: cos2
-  residual_mode: next_delta_norm
+  residual_mode: next_delta_norm 
 
   loss:
-    delta_weight: 35.0
-    recon_weight: 15.0
-    spec_weight: 50.0
-    audio_weight: 400.0
-    timestep_reweight: true
+    delta_weight: 0.7
+    recon_weight: 0.3
+    audio_weight: 8.0
+    multiply_factor : 50.0 # mutiply factor for better loss calculation
 
 model:
   backbone: dit
@@ -75,12 +64,16 @@ model:
   in_chans: 4
   dropout: 0.0
   continuous_emb: false
-  use_ckpt: true
   residual_prediction: true
 
   embed_dim: 768
   num_heads: 8
   num_layers: 5
-  max_freq: 1000.0
+  max_freq: 1000.0 # use if continuous_emb = True
+  patch_f: 19 
+  patch_t: 9 
+  time_stride: 4 # set to 8 for 50% overlap in time if you want fewer artifacts. 
+  pos_embed: sincos_2d # "sincos_2d" ignored when use_rope=True
+  use_rope: true   # set True to enable RotaryEmbedding (1D over tokens)
 
-  reinit_projection: true
+  reinit_projection: true # makes encoder ~orthonormal; decoder ~pseudoinverse
