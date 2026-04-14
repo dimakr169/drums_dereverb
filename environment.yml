@@ -1,0 +1,20 @@
+name: drums_dereverb
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - pip
+  - ffmpeg
+  - libsndfile
+  - numpy>=1.26,<3
+  - scipy>=1.11
+  - pip:
+      - PyYAML>=6.0
+      - soundfile>=0.13
+      - librosa>=0.11
+      - audioread>=3.0
+      - tensorboard>=2.16
+      - audiomentations>=0.40
+      - pyloudnorm>=0.2
+      - pyroomacoustics
+      - rir-generator
