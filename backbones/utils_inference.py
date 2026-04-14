@@ -78,6 +78,28 @@ def trim_or_pad_range(x: np.ndarray, sr: int, min_s: float, max_s: float) -> np.
             x = np.pad(x, ((0, pad), (0, 0)))
     return x
 
+def compute_working_gain(audio: np.ndarray, sr: int,
+                         target_lufs: float = -24.0,
+                         peak_limit: float = 0.99) -> float:
+    if audio.size == 0:
+        return 1.0
+
+    peak = float(np.max(np.abs(audio)))
+    if not np.isfinite(peak) or peak < 1e-8:
+        return 1.0
+
+    meter = pyln.Meter(sr)
+    loudness = meter.integrated_loudness(audio)
+
+    g = float(10.0 ** ((target_lufs - loudness) / 20.0))
+
+    # same spirit as dataset prep: keep a peak safeguard
+    peak_after = float(np.max(np.abs(audio * g)))
+    if peak_after > peak_limit and peak_after > 0:
+        g *= peak_limit / peak_after
+
+    return g
+
 
 def set_loudness(data, rate, LUFS=-28.0):
 
@@ -123,7 +145,7 @@ def segment_audio_torch(audio_np: np.ndarray,
         segs.append(seg)
     return torch.stack(segs, dim=0), step, orig_len  # [N, C, L]
 
-
+'''
 def ola_reconstruct_torch(segs: torch.Tensor, step: int, orig_len: int):
     """
     segs: [N, C, L] time-domain segments
@@ -151,6 +173,83 @@ def ola_reconstruct_torch(segs: torch.Tensor, step: int, orig_len: int):
 
     y = y[:, :orig_len]          # [C, T]
     return y.transpose(0, 1)     # [T, C]
+'''
+
+def ola_reconstruct_torch(segs: torch.Tensor, step: int, orig_len: int):
+    """
+    segs: [N, C, L]
+    returns: [T, C]
+    """
+    N, C, L = segs.shape
+
+    # stronger boundary suppression than sqrt(Hann)
+    w = torch.hann_window(L, periodic=True, device=segs.device, dtype=segs.dtype)
+    w = torch.clamp(w, min=1e-8)
+
+    out_len = step * (N - 1) + L
+    y = segs.new_zeros((C, out_len))
+    norm = segs.new_zeros((out_len,))
+
+    for i in range(N):
+        s = i * step
+        e = s + L
+        y[:, s:e] += segs[i] * w.view(1, L)
+        norm[s:e] += w
+
+    y = y / norm.clamp_min(1e-8).unsqueeze(0)
+    y = y[:, :orig_len]
+    return y.transpose(0, 1).contiguous()
+
+
+def center_crop_stitch_torch(segs: torch.Tensor, step: int, orig_len: int) -> torch.Tensor:
+    """
+    Stitch overlapping segments by keeping only the reliable center region.
+
+    segs: [N, C, L]
+    step: hop size in samples
+    orig_len: target output length in samples
+
+    Returns: [T, C]
+    """
+    N, C, L = segs.shape
+
+    if N == 0:
+        return torch.zeros((orig_len, C), dtype=segs.dtype, device=segs.device)
+
+    if step <= 0 or step > L:
+        raise ValueError(f"Invalid step={step} for segment length L={L}")
+
+    # context discarded from left/right for middle segments
+    total_extra = L - step
+    left_ctx = total_extra // 2
+    right_ctx = total_extra - left_ctx
+
+    pieces = []
+
+    for i in range(N):
+        seg = segs[i]  # [C, L]
+
+        if N == 1:
+            # only one segment: just trim to original length later
+            keep = seg
+
+        elif i == 0:
+            # first segment: keep from start until right crop
+            keep = seg[:, : L - right_ctx]
+
+        elif i == N - 1:
+            # last segment: keep from left crop until end
+            keep = seg[:, left_ctx:]
+
+        else:
+            # middle segments: keep only center "step" samples
+            keep = seg[:, left_ctx : left_ctx + step]
+
+        pieces.append(keep)
+
+    y = torch.cat(pieces, dim=1)   # [C, T_total]
+    y = y[:, :orig_len]            # trim to original target length
+    return y.transpose(0, 1).contiguous()  # [T, C]
 
 ArrayLike = Union[np.ndarray, torch.Tensor]
 

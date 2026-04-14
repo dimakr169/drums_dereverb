@@ -16,8 +16,8 @@ from backbones.utils_inference import (
     ensure_float_audio,
     ensure_stereo,
     resample_audio,
-    trim_or_pad_range,
-    set_loudness,
+    center_crop_stitch_torch,
+    compute_working_gain,
     segment_audio_torch,
     ola_reconstruct_torch,
     audio_to_stereo_ri_stft,
@@ -199,22 +199,6 @@ def load_audio_any(path: Path) -> tuple[np.ndarray, int]:
     return audio.astype(np.float32, copy=False), int(sr)
 
 
-def safe_set_loudness(audio: np.ndarray, sr: int, lufs: float) -> np.ndarray:
-    if audio.size == 0:
-        return audio.astype(np.float32, copy=False)
-
-    peak = float(np.max(np.abs(audio)))
-    if not np.isfinite(peak) or peak < 1e-8:
-        return audio.astype(np.float32, copy=False)
-
-    try:
-        out = set_loudness(audio, sr, LUFS=lufs)
-        out = np.nan_to_num(out, nan=0.0, posinf=0.0, neginf=0.0)
-        return out.astype(np.float32, copy=False)
-    except Exception as exc:
-        print(f"[WARN] Loudness normalization skipped: {exc}")
-        return audio.astype(np.float32, copy=False)
-
 
 class ColdRIInferencer:
     def __init__(self, model: nn.Module, cfg, device: str):
@@ -353,9 +337,10 @@ def preprocess_audio(audio: np.ndarray, sr: int, target_sr: int, trim_seconds: f
         audio = resample_audio(audio, sr, target_sr)
         sr = target_sr
 
-    audio = trim_or_pad_range(audio, sr, min_s=2.0, max_s=trim_seconds)
-    audio = safe_set_loudness(audio, sr, target_lufs)
-    return audio.astype(np.float32, copy=False)
+    gain = compute_working_gain(audio, sr, target_lufs=target_lufs, peak_limit=0.99)
+    audio_work = (audio * gain).astype(np.float32, copy=False)
+
+    return audio_work, gain
 
 
 def reconstruct_from_segments(
@@ -365,18 +350,27 @@ def reconstruct_from_segments(
     orig_len: int,
     residual_mode: str,
     input_audio_np: np.ndarray,
+    stitch_mode: str = "ola",
 ) -> torch.Tensor:
     out_segs = torch.stack(est_segments, dim=0)  # [N,2,L]
 
+    if stitch_mode == "ola":
+        stitch_fn = ola_reconstruct_torch
+    elif stitch_mode == "center_crop":
+        stitch_fn = center_crop_stitch_torch
+    else:
+        raise ValueError(f"Unsupported stitch_mode: {stitch_mode}")
+
     if residual_mode == "direct":
-        return ola_reconstruct_torch(out_segs, step, orig_len)
+        return stitch_fn(out_segs, step, orig_len)
 
     if residual_mode == "next_delta_norm":
         delta_segs = []
         for i in range(out_segs.shape[0]):
             delta_segs.append(out_segs[i] - segs[i].detach().cpu())
         delta_segs = torch.stack(delta_segs, dim=0)
-        delta_full = ola_reconstruct_torch(delta_segs, step, orig_len)
+
+        delta_full = stitch_fn(delta_segs, step, orig_len)
         inp_t = torch.from_numpy(input_audio_np[:orig_len]).to(delta_full.dtype)
         out = inp_t + delta_full
         return torch.clamp(out, -1.0, 1.0)
@@ -392,11 +386,12 @@ def process_one_file(
     cfg,
     trim_seconds: float,
     batch_size: int,
+    stitch_mode: str,
 ):
     print(f"[INFO] Processing: {input_file}")
 
     audio, sr = load_audio_any(input_file)
-    audio = preprocess_audio(
+    audio_work, gain = preprocess_audio(
         audio=audio,
         sr=sr,
         target_sr=int(cfg.data.sr),
@@ -405,7 +400,7 @@ def process_one_file(
     )
 
     segs, step, orig_len = segment_audio_torch(
-        audio,
+        audio_work,
         int(cfg.data.sr),
         ts_min=float(cfg.data.dur),
         overlap=0.5,
@@ -432,8 +427,17 @@ def process_one_file(
         step=step,
         orig_len=orig_len,
         residual_mode=cfg.train.residual_mode,
-        input_audio_np=audio,
+        input_audio_np=audio_work,
+        stitch_mode=stitch_mode,
     )
+
+    # Undo the working gain once, at the very end
+    out_audio = out_audio / max(gain, 1e-8)
+
+    # final peak safeguard
+    peak = float(out_audio.abs().max().item())
+    if peak > 0.99 and peak > 0:
+        out_audio = out_audio * (0.99 / peak)
 
     out_np = np.clip(out_audio.detach().cpu().numpy(), -1.0, 1.0).astype(np.float32)
 
@@ -515,6 +519,13 @@ def main():
         action="store_true",
         help="Load raw model weights instead of applying EMA if available.",
     )
+    parser.add_argument(
+        "--stitch-mode",
+        type=str,
+        default="ola",
+        choices=["ola", "center_crop"],
+        help="How to reconstruct the final waveform from overlapping segments.",
+    )
     args = parser.parse_args()
 
     cfg = load_config(args.config)
@@ -545,6 +556,7 @@ def main():
             cfg=cfg,
             trim_seconds=trim_seconds,
             batch_size=args.batch_size,
+            stitch_mode=args.stitch_mode,
         )
 
     print("[INFO] Done.")
