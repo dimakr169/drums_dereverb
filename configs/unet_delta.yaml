@@ -14,6 +14,8 @@ runtime:
 
 data:
   inp_type: wav # flac may not work without modifications
+  dur: 2 # duration of input file in seconds
+  lufs: -24.0 # loudness for inference usage only
   sr: 44100
   hop: 384
   win: 1024

@@ -228,7 +228,7 @@ class ColdRIInferencer:
         if int(self.train_params.diffusion_steps) != 16:
             print(
                 f"[WARN] YAML train.diffusion_steps={self.train_params.diffusion_steps}, "
-                "but this camera-ready inference script uses fixed 16 reverse steps."
+                "The provided saved models are using fixed 16 reverse steps."
             )
         self.diffusion_steps = 16
         self.alpha_mode = self.train_params.alpha_mode
@@ -276,30 +276,28 @@ class ColdRIInferencer:
         win_length = self.pre_params.win
         window = self._get_window_for_device(ri_stft.device)
 
-        with torch.amp.autocast(device_type="cuda", enabled=False):
-            L = torch.complex(ri_stft[:, 0].float(), ri_stft[:, 1].float())
-            R = torch.complex(ri_stft[:, 2].float(), ri_stft[:, 3].float())
+        L = torch.complex(ri_stft[:, 0].float(), ri_stft[:, 1].float())
+        R = torch.complex(ri_stft[:, 2].float(), ri_stft[:, 3].float())
 
-            recL = torch.istft(
-                L,
-                n_fft=int(n_fft),
-                hop_length=int(hop),
-                win_length=int(win_length),
-                window=window,
-                center=self.center,
-                length=self.segment_length,
-            )
-            recR = torch.istft(
-                R,
-                n_fft=int(n_fft),
-                hop_length=int(hop),
-                win_length=int(win_length),
-                window=window,
-                center=self.center,
-                length=self.segment_length,
-            )
-            out = torch.stack([recL, recR], dim=1)
-        return out
+        recL = torch.istft(
+            L,
+            n_fft=int(n_fft),
+            hop_length=int(hop),
+            win_length=int(win_length),
+            window=window,
+            center=self.center,
+            length=self.segment_length,
+        )
+        recR = torch.istft(
+            R,
+            n_fft=int(n_fft),
+            hop_length=int(hop),
+            win_length=int(win_length),
+            window=window,
+            center=self.center,
+            length=self.segment_length,
+        )
+        return torch.stack([recL, recR], dim=1)
 
     @torch.no_grad()
     def reverse_diffusion(self, inp_ri: torch.Tensor) -> torch.Tensor:
@@ -393,6 +391,7 @@ def process_one_file(
     inferencer: ColdRIInferencer,
     cfg,
     trim_seconds: float,
+    batch_size: int,
 ):
     print(f"[INFO] Processing: {input_file}")
 
@@ -417,10 +416,15 @@ def process_one_file(
     ri_in = audio_to_stereo_ri_stft(segs, config=cfg.data, device=inferencer.device)
 
     est_segments = []
+    batch_size = max(1, int(batch_size))
+
     with torch.inference_mode():
-        for s in range(ri_in.shape[0]):
-            _, est_wav = inferencer.dereverb_batch(ri_in[s : s + 1])
-            est_segments.append(est_wav.squeeze(0).detach().cpu())
+        for start in range(0, ri_in.shape[0], batch_size):
+            batch_ri = ri_in[start:start + batch_size]          # [B,4,F,T]
+            _, est_wav = inferencer.dereverb_batch(batch_ri)    # [B,2,L]
+
+            for b in range(est_wav.shape[0]):
+                est_segments.append(est_wav[b].detach().cpu())
 
     out_audio = reconstruct_from_segments(
         segs=segs,
@@ -444,6 +448,29 @@ def process_one_file(
 
     sf.write(out_path.as_posix(), out_np, int(cfg.data.sr))
     print(f"[INFO] Saved: {out_path}")
+
+def resolve_device(gpu_arg: int, cfg_runtime):
+    if gpu_arg == -1:
+        print("[INFO] Forced CPU inference (--gpu -1).")
+        return "cpu"
+
+    if torch.cuda.is_available():
+        n_gpus = torch.cuda.device_count()
+        if gpu_arg < 0 or gpu_arg >= n_gpus:
+            raise ValueError(f"Requested --gpu {gpu_arg}, but available GPU indices are 0..{n_gpus-1}")
+
+        device = f"cuda:{gpu_arg}"
+        torch.cuda.set_device(gpu_arg)
+
+        torch.backends.cudnn.benchmark = bool(getattr(cfg_runtime, "cudnn_benchmark", True))
+        torch.backends.cuda.matmul.allow_tf32 = bool(getattr(cfg_runtime, "allow_tf32", False))
+        torch.set_float32_matmul_precision(getattr(cfg_runtime, "matmul_precision", "high"))
+
+        print(f"[INFO] Using device: {device}")
+        return device
+
+    print("[WARN] CUDA not available, falling back to CPU.")
+    return "cpu"
 
 
 def main():
@@ -474,8 +501,14 @@ def main():
     parser.add_argument(
         "--gpu",
         type=int,
-        default=None,
-        help="Optional GPU override. Defaults to runtime.gpu from YAML.",
+        default=0,
+        help="CUDA device index for inference. Use -1 to force CPU. Default: 0.",
+    )
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=4,
+        help="Number of 2-second segments processed together during inference.",
     )
     parser.add_argument(
         "--no-ema",
@@ -486,21 +519,9 @@ def main():
 
     cfg = load_config(args.config)
 
-    if args.gpu is not None:
-        cfg.runtime.gpu = args.gpu
-
     trim_seconds = float(np.clip(args.trim_seconds, 2.0, 30.0))
 
-    if torch.cuda.is_available():
-        device = f"cuda:{cfg.runtime.gpu}"
-        torch.cuda.set_device(cfg.runtime.gpu)
-        torch.backends.cudnn.benchmark = bool(getattr(cfg.runtime, "cudnn_benchmark", True))
-        torch.backends.cuda.matmul.allow_tf32 = bool(getattr(cfg.runtime, "allow_tf32", False))
-        torch.set_float32_matmul_precision(getattr(cfg.runtime, "matmul_precision", "high"))
-        print(f"[INFO] Using device: {device}")
-    else:
-        device = "cpu"
-        print("[INFO] CUDA not available, using CPU.")
+    device = resolve_device(args.gpu, cfg.runtime)
 
     model = build_model(cfg.model)
     ckpt_path = resolve_checkpoint(cfg, args.checkpoint)
@@ -523,6 +544,7 @@ def main():
             inferencer=inferencer,
             cfg=cfg,
             trim_seconds=trim_seconds,
+            batch_size=args.batch_size,
         )
 
     print("[INFO] Done.")
