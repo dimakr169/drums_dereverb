@@ -1,14 +1,15 @@
-import os, argparse, random
+import os
+import argparse
+import random
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
 import numpy as np
 import soundfile as sf
-
 from audiomentations import Compose, PitchShift, TimeStretch, SevenBandParametricEQ
-from config import Config
 
-from preprocess_utils import (
+from dataset.data_config import DataConfig
+from dataset.preprocess_utils import (
     create_rir_conds_stereo,
     create_rir_conds_openair,
     detect_energy,
@@ -169,36 +170,42 @@ def process_item(file_path, pre_params, anechoic_path, reverb_path, rir_pools):
             except Exception as e:
                 print(f"Aborted processing {audio_filename}, context {ctx_idx}, augmentation {cnt} due to: {e}")
 
-def process_batch(file_paths, pre_params, anechoic_path, reverb_path, rir_folder):
+def process_batch(file_paths, pre_params, anechoic_path, reverb_path, rir_pools):
     for file_path in file_paths:
-        process_item(file_path, pre_params, anechoic_path, reverb_path, rir_folder)
+        process_item(file_path, pre_params, anechoic_path, reverb_path, rir_pools)
 
 def main(args):
-    pre_params = Config()
-    current_dir = Path.cwd()
-    data_dir = current_dir.parent / "data/gmd_musdb18hq_stereo"    
-    rir_pools = [
-        {"folder": current_dir.parent / "data/OpenAir_stereo_RIRs",      "mode": "room"},
-        # {"folder": current_dir.parent / "data/ReverbFX_stereo", "mode": "send"}, #for future use
-    ]
+    pre_params = DataConfig()
+
+    data_dir = Path(args.dataset_path)
+    rir_pools = [{"folder": Path(p), "mode": args.rir_mode} for p in args.rir_path]
 
     drum_files = load_drum_files(data_dir)
     print(f"Found {len(drum_files)} drum files.")
 
     anechoic_path = os.path.join(args.out_path, "anechoic")
-    os.makedirs(anechoic_path, exist_ok=True)
     reverb_path = os.path.join(args.out_path, "reverb")
+    os.makedirs(anechoic_path, exist_ok=True)
     os.makedirs(reverb_path, exist_ok=True)
 
-    # Define a batch size (adjust as needed)
-    batch_size = 5
-    batches = [drum_files[i:i + batch_size] for i in range(0, len(drum_files), batch_size)]
+    batches = [
+        drum_files[i:i + args.batch_size]
+        for i in range(0, len(drum_files), args.batch_size)
+    ]
 
-    with ProcessPoolExecutor(max_workers=os.cpu_count()) as executor:
+    with ProcessPoolExecutor(max_workers=args.num_workers) as executor:
         futures = [
-            executor.submit(process_batch, batch, pre_params, anechoic_path, reverb_path, rir_pools)
+            executor.submit(
+                process_batch,
+                batch,
+                pre_params,
+                anechoic_path,
+                reverb_path,
+                rir_pools,
+            )
             for batch in batches
         ]
+
         for future in as_completed(futures):
             future.result()
 
@@ -206,6 +213,45 @@ def main(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--out-path", default=str(Path.cwd().parent / "data/out_combined_stereo"), type=str)
+
+    parser.add_argument(
+        "--dataset-path",
+        type=str,
+        required=True,
+        help="Path to the input stereo drum dataset root."
+    )
+    parser.add_argument(
+        "--rir-path",
+        type=str,
+        action="append",
+        required=True,
+        help="Path to a stereo RIR folder. Can be passed multiple times."
+    )
+    parser.add_argument(
+        "--out-path",
+        type=str,
+        required=True,
+        help="Output folder where anechoic/ and reverb/ will be created."
+    )
+    parser.add_argument(
+        "--rir-mode",
+        type=str,
+        default="room", # send type is for future use
+        choices=["room", "send"],
+        help="How to interpret the provided RIR folders."
+    )
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=8,
+        help="How many source files to process per worker submission."
+    )
+    parser.add_argument(
+        "--num-workers",
+        type=int,
+        default=os.cpu_count(),
+        help="Number of worker processes."
+    )
+
     args = parser.parse_args()
     main(args)

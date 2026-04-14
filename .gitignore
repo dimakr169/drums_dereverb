@@ -1,11 +1,6 @@
 data/
 saved_models/
-pretrained_models/
-selected_examples/
-sgmse/
-.logs/
 eval_out/
-gradio_examples/
 exps/
 
 # Exclude all __pycache__ directories anywhere in the project
