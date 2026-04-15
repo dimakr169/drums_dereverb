@@ -10,22 +10,8 @@ import soundfile as sf
 import numpy as np
 import pyloudnorm as pyln
 import pyroomacoustics as pra
-from rir_generator import generate
 from scipy.signal import fftconvolve
 
-'''
-def trim_audio(data, rate, ts=2):
-
-    if rate * ts < len(data):
-        # cut it
-        data = data[: rate * ts]
-    else:
-        # add silence
-        diff = rate * ts - len(data)
-        data = np.pad(data, (0, diff))
-
-    return data
-'''
 
 def trim_audio(data, rate, ts=2):
     """
@@ -66,6 +52,32 @@ def _align_rir_to_direct_peak(rir: np.ndarray) -> np.ndarray:
     out[: rir.size - t0] = rir[t0:]
     return out
 
+def _early_lr_diff_db(rir_stereo: np.ndarray, fs: int, early_ms: float = 20.0, eps: float = 1e-8) -> float:
+    """
+    Measure left/right early-energy mismatch in dB.
+    Used to reject strongly panned / imbalanced measured RIRs.
+    """
+    n = max(1, int(fs * early_ms / 1000.0))
+    early = rir_stereo[: min(n, rir_stereo.shape[0]), :]
+
+    rms_l = np.sqrt(np.mean(early[:, 0] ** 2) + eps)
+    rms_r = np.sqrt(np.mean(early[:, 1] ** 2) + eps)
+
+    return float(abs(20.0 * np.log10(rms_l / rms_r)))
+
+def _align_stereo_rir_per_channel(rir_stereo: np.ndarray) -> np.ndarray:
+    """
+    Align left/right channels independently to remove ITD.
+    """
+    if rir_stereo.ndim != 2 or rir_stereo.shape[1] != 2:
+        return rir_stereo
+
+    rir_l = _align_rir_to_direct_peak(rir_stereo[:, 0].astype(np.float32))
+    rir_r = _align_rir_to_direct_peak(rir_stereo[:, 1].astype(np.float32))
+
+    n = min(len(rir_l), len(rir_r))
+    return np.stack([rir_l[:n], rir_r[:n]], axis=1).astype(np.float32)
+
 
 def _align_stereo_rir_preserve_itd(rir_stereo: np.ndarray) -> np.ndarray:
     """Align stereo RIR by earliest direct-path peak (preserves ITD)."""
@@ -80,40 +92,96 @@ def _align_stereo_rir_preserve_itd(rir_stereo: np.ndarray) -> np.ndarray:
     out[: rir_stereo.shape[0] - t0, :] = rir_stereo[t0:, :]
     return out
 
+def _normalize_stereo_rir_common(
+    rir_stereo: np.ndarray,
+    fs: int,
+    early_ms: float = 50.0,
+    mode: str = "rms",
+    target: float = 0.1,
+    eps: float = 1e-8,
+) -> np.ndarray:
+    """
+    Apply ONE common scalar to both channels.
+    Use only the early part to compute the normalization reference.
+    """
+    n = max(1, int(fs * early_ms / 1000.0))
+    early = rir_stereo[: min(n, rir_stereo.shape[0]), :]
 
-def match_loudness_pair(
-    dry: np.ndarray,
-    lossy: np.ndarray,
-    rate: int,
-    target_lufs: float = -24.0,
-    peak_limit: float = 0.99,
-):
-    """Apply a *single* gain (computed from `dry`) to both `dry` and `lossy`."""
-    meter = pyln.Meter(rate)
-    L = meter.integrated_loudness(dry)
-    g = float(10.0 ** ((target_lufs - L) / 20.0))
-    dry_s = dry * g
-    lossy_s = lossy * g
-
-    peak = float(max(np.max(np.abs(dry_s)), np.max(np.abs(lossy_s))))
-    if peak > peak_limit and peak > 0:
-        s = peak_limit / peak
-        dry_s *= s
-        lossy_s *= s
-    return dry_s, lossy_s
-
-'''
-def detect_energy(data, threshold=0.01):
-
-    data_abs = np.abs(data)
-
-    if statistics.mean(data_abs) > threshold:
-        is_ok = True
+    if mode == "peak":
+        ref = float(np.max(np.abs(early)))
+    elif mode == "rms":
+        ref = float(np.sqrt(np.mean(early ** 2) + eps))
     else:
-        is_ok = False
+        raise ValueError(f"Unsupported normalization mode: {mode}")
 
-    return is_ok
-'''
+    if ref > eps:
+        rir_stereo = rir_stereo * (target / ref)
+
+    return rir_stereo.astype(np.float32, copy=False)
+
+
+def _load_random_valid_openair_rir(
+    rir_folder,
+    fs: int,
+    max_tries: int = 20,
+    max_early_lr_diff_db: float = 4.0,
+    remove_itd: bool = True,
+    norm_mode: str = "rms",
+    norm_target: float = 0.1,
+    norm_early_ms: float = 50.0,
+):
+    """
+    Load a random stereo RIR, reject extreme stereo imbalances,
+    optionally remove ITD, and apply common normalization.
+    """
+    rir_paths = [
+        os.path.join(root, f)
+        for root, _, files in os.walk(rir_folder)
+        for f in files
+        if f.endswith(".wav")
+    ]
+    if not rir_paths:
+        raise ValueError(f"No RIRs found in {rir_folder}")
+
+    last_error = None
+
+    for _ in range(max_tries):
+        rir_path = random.choice(rir_paths)
+
+        try:
+            rir, rir_sr = sf.read(rir_path)
+            if rir_sr != fs:
+                continue
+            if rir.ndim != 2 or rir.shape[1] != 2:
+                continue
+
+            rir = rir.astype(np.float32, copy=False)
+
+            if remove_itd:
+                rir = _align_stereo_rir_per_channel(rir)
+
+            lr_diff_db = _early_lr_diff_db(rir, fs=fs, early_ms=20.0)
+            if lr_diff_db > max_early_lr_diff_db:
+                continue
+
+            rir = _normalize_stereo_rir_common(
+                rir,
+                fs=fs,
+                early_ms=norm_early_ms,
+                mode=norm_mode,
+                target=norm_target,
+            )
+            return rir
+
+        except Exception as e:
+            last_error = e
+            continue
+
+    if last_error is not None:
+        raise RuntimeError(f"Failed to load a valid stereo RIR from {rir_folder}: {last_error}")
+    raise RuntimeError(f"Failed to find a valid stereo RIR in {rir_folder}")
+
+
 
 # Works for both mono and stereo
 def detect_energy(data, threshold=0.01):
@@ -162,52 +230,6 @@ def simulate_room_for_channel(mic_pos, source_pos, audio_mono, room_dim, fs, abs
     signal = np.array(room.mic_array.signals)[0]
     return np.squeeze(signal)
 
-
-'''
-def create_rir_conds_stereo(t60, room_dim, min_distance_to_wall, fs, audio_ex, mic_spacing=0.2):
-    """
-    Create stereo reverberant and dry signals where reverberation is spatially *correlated*
-    (same RIR applied to both channels), to avoid artificial stereo drift.
-    """
-    left_audio = audio_ex[:, 0]
-    right_audio = audio_ex[:, 1]
-
-    # --- Shared mic and source for reverb field ---
-    mic_center = np.array([
-        np.random.uniform(min_distance_to_wall, room_dim[n] - min_distance_to_wall)
-        for n in range(3)
-    ])
-    source_pos = np.array([
-        np.random.uniform(min_distance_to_wall, room_dim[n] - min_distance_to_wall)
-        for n in range(3)
-    ])
-
-    # Use one RIR for both channels to ensure realistic stereo balance
-    shared_mic = mic_center.reshape(3, 1)
-    absorption, max_order = pra.inverse_sabine(t60, room_dim)
-    shared_rir = get_common_rir(shared_mic, source_pos, room_dim, fs, absorption, max_order, ray_tracing=True)
-
-    rev_left = fftconvolve(left_audio, shared_rir, mode="full")[:len(left_audio)]
-    rev_right = fftconvolve(right_audio, shared_rir, mode="full")[:len(right_audio)]
-    reverberant_stereo = np.vstack([rev_left, rev_right])
-
-    # --- Fixed mic-source for dry version (no stereo drift) ---
-    mic_center_dry = np.array([2.0, 1.5, 1.2])
-    source_dry = np.array([2.0, 2.0, 1.2])
-    left_mic_dry = mic_center_dry.copy(); left_mic_dry[0] -= mic_spacing / 2.0
-    right_mic_dry = mic_center_dry.copy(); right_mic_dry[0] += mic_spacing / 2.0
-
-    rir_l_dry = get_common_rir(left_mic_dry.reshape(3, 1), source_dry, room_dim, fs, 0.99, 0, ray_tracing=False)
-    rir_r_dry = get_common_rir(right_mic_dry.reshape(3, 1), source_dry, room_dim, fs, 0.99, 0, ray_tracing=False)
-
-    dry_left = fftconvolve(left_audio, rir_l_dry, mode="full")[:len(left_audio)]
-    dry_right = fftconvolve(right_audio, rir_r_dry, mode="full")[:len(right_audio)]
-    dry_stereo = np.vstack([dry_left, dry_right])
-
-    # --- Match length ---
-    min_len = min(reverberant_stereo.shape[1], dry_stereo.shape[1])
-    return reverberant_stereo[:, :min_len], dry_stereo[:, :min_len]
-'''
 
 def create_rir_conds_stereo(t60, room_dim, min_distance_to_wall, fs, audio_ex, mic_spacing=0.2):
     """Create (reverberant, dry) stereo pair using pyroomacoustics RIRs.
@@ -327,105 +349,7 @@ def create_rir_conds(t60, room_dim, min_distance_to_wall, fs, audio_ex):
 
     return lossy_ex, dry_ex
 
-def create_rir_generator_stereo(t60, room_dim, min_distance_to_wall, fs, audio_ex):
-    """
-    Create stereo reverberant and dry examples using rir-generator,
-    with a shared RIR applied to both channels for realistic spatial behavior.
-
-    Parameters:
-        t60 (float): Reverberation time in seconds.
-        room_dim (tuple): Room dimensions (LxWxH) in meters.
-        min_distance_to_wall (float): Minimum distance of mic and source from walls.
-        fs (int): Sampling rate in Hz.
-        audio_ex (ndarray): Stereo input audio of shape (samples, 2).
-
-    Returns:
-        Tuple (reverberant_stereo, dry_stereo) each of shape (2, N).
-    """
-    if audio_ex.ndim != 2 or audio_ex.shape[1] != 2:
-        raise ValueError("Input audio must be stereo with shape (samples, 2)")
-
-    left_audio = audio_ex[:, 0]
-    right_audio = audio_ex[:, 1]
-
-    # --- Shared mic and source positions ---
-    mic_pos = [
-        np.random.uniform(min_distance_to_wall, room_dim[n] - min_distance_to_wall)
-        for n in range(3)
-    ]
-    source_pos = [
-        np.random.uniform(min_distance_to_wall, room_dim[n] - min_distance_to_wall)
-        for n in range(3)
-    ]
-
-    # --- RIR parameters ---
-    rir_len = min(int(fs * np.random.uniform(t60, 2 * t60)), int(fs * 0.5))
-
-    # --- Reverberant RIR (shared) ---
-    rir_rev = generate(c=340, fs=fs, r=mic_pos, s=source_pos, L=room_dim,
-                       reverberation_time=t60, nsample=rir_len).squeeze()
-
-    rev_left = fftconvolve(left_audio, rir_rev, mode="full")[:len(left_audio)]
-    rev_right = fftconvolve(right_audio, rir_rev, mode="full")[:len(right_audio)]
-    reverberant_stereo = np.vstack([rev_left, rev_right])
-
-    # --- Dry RIR (shared, short, high absorption) ---
-    rir_dry = generate(c=340, fs=fs, r=mic_pos, s=source_pos, L=room_dim,
-                       reverberation_time=0.3, nsample=int(fs * 0.03)).squeeze()
-
-    dry_left = fftconvolve(left_audio, rir_dry, mode="full")[:len(left_audio)]
-    dry_right = fftconvolve(right_audio, rir_dry, mode="full")[:len(right_audio)]
-    dry_stereo = np.vstack([dry_left, dry_right])
-
-    # --- Match lengths ---
-    min_len = min(reverberant_stereo.shape[1], dry_stereo.shape[1])
-    return reverberant_stereo[:, :min_len], dry_stereo[:, :min_len]
-
 '''
-def create_rir_conds_openair(fs, audio_ex, rir_folder, mix_range=(0.7, 1.0)):
-    """
-    Apply a random stereo OpenAIR RIR to a stereo audio input, with adjustable wet/dry mix.
-
-    Parameters:
-        fs (int): Sample rate (must match RIR)
-        audio_ex (np.ndarray): Stereo input audio, shape (samples, 2)
-        rir_folder (str): Path to processed OpenAIR RIRs (must be stereo, 44.1kHz)
-        mix_range (tuple): Range of alpha (wet signal contribution), e.g., (0.7, 1.0)
-
-    Returns:
-        (reverberant_stereo, dry_stereo)
-    """
-    # Collect all valid .wav RIRs recursively
-    rir_paths = [
-        os.path.join(root, f)
-        for root, _, files in os.walk(rir_folder)
-        for f in files
-        if f.endswith(".wav")
-    ]
-    if not rir_paths:
-        raise ValueError(f"No RIRs found in {rir_folder}")
-
-    # Pick random RIR
-    rir_path = random.choice(rir_paths)
-    rir, rir_sr = sf.read(rir_path)
-    if rir_sr != fs:
-        raise ValueError(f"RIR sample rate {rir_sr} does not match expected {fs}")
-    if rir.ndim != 2 or rir.shape[1] != 2:
-        raise ValueError(f"Expected stereo RIR, got shape {rir.shape}")
-
-    # Convolve both channels
-    rev_left = fftconvolve(audio_ex[:, 0], rir[:, 0], mode="full")[:len(audio_ex)]
-    rev_right = fftconvolve(audio_ex[:, 1], rir[:, 1], mode="full")[:len(audio_ex)]
-    reverb = np.vstack([rev_left, rev_right])
-
-    # Mix dry + reverb
-    alpha = np.random.uniform(*mix_range)
-    dry = np.swapaxes(audio_ex, 0, 1)
-    output = alpha * reverb + (1 - alpha) * dry
-
-    return output, dry
-'''
-
 def create_rir_conds_openair(
     fs,
     audio_ex,
@@ -482,65 +406,164 @@ def create_rir_conds_openair(
         out = wet
 
     return out.T, dry.T
+'''
 
-
-
-
-def create_rir_conds_rir_generator(t60, room_dim, min_distance_to_wall, fs, audio_ex):
+def create_rir_conds_openair(
+    fs,
+    audio_ex,
+    rir_folder,
+    mix_range=(0.2, 1.0),
+    early_ms: float = 80.0,
+    mode: str = "room",
+    wet_gain_range=(0.0, 1.0),
+    max_tries: int = 20,
+    max_early_lr_diff_db: float = 4.0,
+    remove_itd: bool = True,
+    rir_norm_mode: str = "rms",
+    rir_norm_target: float = 0.1,
+    rir_norm_early_ms: float = 50.0,
+):
     """
-    Create reverberant and dry audio conditions using RIR-Generator.
+    - remove ITD to match synthetic path
+    - reject extreme stereo imbalance
+    - apply common stereo normalization
+    - keep room mode as the default physical model
     """
-    # Sample microphone and source positions
-    mic_position = [
-        np.random.uniform(min_distance_to_wall, room_dim[n] - min_distance_to_wall)
-        for n in range(3)
-    ]
-    source_position = [
-        np.random.uniform(min_distance_to_wall, room_dim[n] - min_distance_to_wall)
-        for n in range(3)
-    ]
+    if audio_ex.ndim != 2 or audio_ex.shape[1] != 2:
+        raise ValueError("Input audio must be stereo with shape (samples, 2)")
 
-    # Randomize RIR length
-    rir_length = int(
-        fs * np.random.uniform(t60, t60 * 2)  # Randomize within [t60, t60 * 2]
-    )
-    rir_length = min(rir_length, int(fs * 0.5))  # Cap at 0.5 seconds max
-    
-    rir = generate(
-        c=340, fs=fs, r=mic_position, s=source_position, L=room_dim, reverberation_time=t60, nsample=rir_length
-    )
-    rir = rir.squeeze()  # Ensure RIR is 1D
-    assert rir.ndim == 1, f"RIR must be 1D, but got shape {rir.shape}."
-
-    # Apply RIR
-    lossy_ex = fftconvolve(audio_ex, rir, mode="full")[:len(audio_ex)]
-
-    # Use the clean input for dry audio
-    #dry_ex = audio_ex.copy()
-    # Recreate anechoic input based on room dimensions
-    dry_rir = generate(
-        c=340,
+    rir = _load_random_valid_openair_rir(
+        rir_folder=rir_folder,
         fs=fs,
-        r=mic_position,
-        s=source_position,
-        L=room_dim,
-        reverberation_time=0.3,  # Simulate a highly absorbing room
-        nsample=int(fs * 0.03),  # Very short RIR length for anechoic conditions
+        max_tries=max_tries,
+        max_early_lr_diff_db=max_early_lr_diff_db,
+        remove_itd=remove_itd,
+        norm_mode=rir_norm_mode,
+        norm_target=rir_norm_target,
+        norm_early_ms=rir_norm_early_ms,
     )
-    dry_rir = dry_rir.squeeze()
-    assert dry_rir.ndim == 1, f"Dry RIR must be 1D, but got shape {dry_rir.shape}."
 
-    # Apply the dry RIR
-    dry_ex = fftconvolve(audio_ex, dry_rir, mode="full")[:len(audio_ex)]
+    split = int((early_ms / 1000.0) * fs)
+    k = float(np.random.uniform(*mix_range))
 
-    # Add noise floor to the dry signal
-    #noise_floor_snr = 50
-    #noise_floor_power = (
-    #    1 / dry_ex.shape[0] * np.sum(dry_ex**2) * np.power(10, -noise_floor_snr / 10)
-    #)
-    #noise_floor_signal = np.random.rand(int(0.5 * fs)) * np.sqrt(noise_floor_power)
-    #dry_ex = np.concatenate([dry_ex, noise_floor_signal])
+    if 0 < split < rir.shape[0]:
+        early = rir[:split, :].copy()
+        late = rir[split:, :].copy()
+        late *= k
+        rir_mod = np.concatenate([early, late], axis=0)
+    else:
+        rir_mod = rir
 
-    # Ensure equal lengths
-    min_length = min(len(lossy_ex), len(dry_ex))
-    return lossy_ex[:min_length], dry_ex[:min_length]
+    # Match current synthetic path: collapse source to mono-mid before room rendering
+    mid = 0.5 * (audio_ex[:, 0] + audio_ex[:, 1])
+
+    wet_left = fftconvolve(mid, rir_mod[:, 0], mode="full")[: len(audio_ex)]
+    wet_right = fftconvolve(mid, rir_mod[:, 1], mode="full")[: len(audio_ex)]
+    wet = np.stack([wet_left, wet_right], axis=1).astype(np.float32)
+
+    dry = audio_ex.astype(np.float32, copy=True)
+
+    if mode == "send":
+        g = float(np.random.uniform(*wet_gain_range))
+        out = dry + g * wet
+    else:
+        # room mode: return the room capture only
+        out = wet
+
+    return out.T, dry.T
+
+
+def normalize_source_once(
+    x: np.ndarray,
+    rate: int,
+    target_lufs: float = -24.0,
+    peak_limit: float = 0.99,
+    eps: float = 1e-8,
+):
+    """
+    Normalize the dry source BEFORE RIR rendering.
+    This is the only loudness normalization step.
+    """
+    meter = pyln.Meter(rate)
+    try:
+        L = float(meter.integrated_loudness(x))
+    except Exception:
+        rms = float(np.sqrt(np.mean(x ** 2) + eps))
+        L = 20.0 * np.log10(rms + eps)
+
+    g = float(10.0 ** ((target_lufs - L) / 20.0))
+    x = x * g
+
+    peak = float(np.max(np.abs(x)))
+    if peak > peak_limit and peak > 0:
+        x = x * (peak_limit / peak)
+
+    return x.astype(np.float32, copy=False)
+
+
+def calibrate_wet_full_context_relative_to_dry(
+    dry: np.ndarray,
+    wet: np.ndarray,
+    rate: int,
+    target_rms_ratio_range=(0.80, 1.00),
+    max_lufs_delta_db=0.5,
+    max_gain_db=12.0,
+    eps: float = 1e-8,
+):
+    """
+    Scale ONLY the wet signal so that its full-context RMS relative to dry
+    lies in a bounded range, then apply a loudness guardrail.
+
+    This is better than active-mask RMS when long late tails make the
+    reverberant excerpt sound globally louder.
+    """
+    dry_rms = float(np.sqrt(np.mean(dry ** 2) + eps))
+    wet_rms = float(np.sqrt(np.mean(wet ** 2) + eps))
+
+    if dry_rms < eps or wet_rms < eps:
+        return wet.astype(np.float32, copy=False)
+
+    # 1) Main calibration: full-context RMS ratio
+    target_ratio = float(np.random.uniform(*target_rms_ratio_range))
+    current_ratio = wet_rms / dry_rms
+
+    g = target_ratio / max(current_ratio, eps)
+    g_db = 20.0 * np.log10(max(g, eps))
+    g_db = float(np.clip(g_db, -max_gain_db, max_gain_db))
+    g = float(10.0 ** (g_db / 20.0))
+
+    wet = wet * g
+
+    # 2) Guardrail: prevent wet from ending up clearly louder than dry in LUFS
+    try:
+        meter = pyln.Meter(rate)
+        L_dry = float(meter.integrated_loudness(dry))
+        L_wet = float(meter.integrated_loudness(wet))
+
+        delta = L_wet - L_dry
+        if delta > max_lufs_delta_db:
+            g2_db = max_lufs_delta_db - delta
+            g2 = float(10.0 ** (g2_db / 20.0))
+            wet = wet * g2
+    except Exception:
+        pass
+
+    return wet.astype(np.float32, copy=False)
+
+
+def apply_final_peak_safety(
+    dry: np.ndarray,
+    wet: np.ndarray,
+    peak_limit: float = 0.99,
+):
+    """
+    Final shared peak safety only.
+    No loudness normalization here.
+    """
+    peak = float(max(np.max(np.abs(dry)), np.max(np.abs(wet))))
+    if peak > peak_limit and peak > 0:
+        s = peak_limit / peak
+        dry = dry * s
+        wet = wet * s
+
+    return dry.astype(np.float32, copy=False), wet.astype(np.float32, copy=False)

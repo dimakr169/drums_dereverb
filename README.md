@@ -119,9 +119,10 @@ python inference_cold_ri.py \
 ---
 
 
+## 5. Examples
+Coming soon
 
-
-## 5. Reference
+## 6. Reference
 
 We kindly ask you to cite the paper in your publication when using any of our research or code:
 

@@ -16,6 +16,7 @@ from backbones.utils_inference import (
     ensure_float_audio,
     ensure_stereo,
     resample_audio,
+    trim_or_pad_range,
     center_crop_stitch_torch,
     compute_working_gain,
     segment_audio_torch,
@@ -336,6 +337,8 @@ def preprocess_audio(audio: np.ndarray, sr: int, target_sr: int, trim_seconds: f
     if sr != target_sr:
         audio = resample_audio(audio, sr, target_sr)
         sr = target_sr
+
+    audio = trim_or_pad_range(audio, sr, min_s=2.0, max_s=trim_seconds)
 
     gain = compute_working_gain(audio, sr, target_lufs=target_lufs, peak_limit=0.99)
     audio_work = (audio * gain).astype(np.float32, copy=False)

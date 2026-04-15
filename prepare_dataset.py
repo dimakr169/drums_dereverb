@@ -13,7 +13,9 @@ from dataset.preprocess_utils import (
     create_rir_conds_stereo,
     create_rir_conds_openair,
     detect_energy,
-    match_loudness_pair,
+    normalize_source_once,
+    calibrate_wet_full_context_relative_to_dry,
+    apply_final_peak_safety,
     trim_audio,
 )
 
@@ -85,6 +87,14 @@ def process_item(file_path, pre_params, anechoic_path, reverb_path, rir_pools):
                 # Ensure fixed context length after augmentation (time-stretch can change length)
                 dry_ctx = trim_audio(dry_ctx, pre_params.sr, context_dur)
 
+                # Normalize source before any RIR rendering
+                dry_ctx = normalize_source_once(
+                    dry_ctx,
+                    pre_params.sr,
+                    target_lufs=pre_params.lufs,
+                    peak_limit=0.99,
+                )
+
                 t60 = np.random.uniform(pre_params.t60_r[0], pre_params.t60_r[1])
                 room_dim = np.array(
                     [
@@ -117,18 +127,34 @@ def process_item(file_path, pre_params, anechoic_path, reverb_path, rir_pools):
                         mode=pool["mode"],            # <-- only change you need
                         mix_range=(0.2, 1.0),          # in room mode: late-tail multiplier
                         wet_gain_range=(0.1, 1.0),     # in send mode: α range
+                        early_ms=80.0,
+                        max_tries=20,
+                        max_early_lr_diff_db=4.0,
+                        remove_itd=True,
+                        rir_norm_mode="rms",
+                        rir_norm_target=0.1,
+                        rir_norm_early_ms=50.0,
                     )
 
                 # Convert to (samples,2)
                 lossy_ctx = np.swapaxes(lossy_cf, 0, 1)
                 dry_ctx_pair = np.swapaxes(dry_cf, 0, 1)
 
-                # Apply ONE gain (from dry) to BOTH, to preserve physical relationship
-                dry_ctx_pair, lossy_ctx = match_loudness_pair(
+                # Calibrate the wet signal using active-sample RMS relative to dry
+
+                lossy_ctx = calibrate_wet_full_context_relative_to_dry(
                     dry_ctx_pair,
                     lossy_ctx,
                     pre_params.sr,
-                    target_lufs=pre_params.lufs,
+                    target_rms_ratio_range=(0.80, 1.00),
+                    max_lufs_delta_db=0.0,
+                    max_gain_db=12.0,
+                )
+
+                # Final shared peak safety only
+                dry_ctx_pair, lossy_ctx = apply_final_peak_safety(
+                    dry_ctx_pair,
+                    lossy_ctx,
                     peak_limit=0.99,
                 )
 

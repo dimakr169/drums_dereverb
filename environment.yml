@@ -17,4 +17,3 @@ dependencies:
       - audiomentations>=0.40
       - pyloudnorm>=0.2
       - pyroomacoustics
-      - rir-generator
