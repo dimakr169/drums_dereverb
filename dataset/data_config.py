@@ -10,7 +10,7 @@ class DataConfig:
         self.context_dur = 10 # split audio inputs into context segments
 
         self.lufs = -24.0  # for audio normalizing
-        self.threshold = 0.0001  # for energy threshold to avoid silent parts
+        self.threshold = 0.0005  # for energy threshold to avoid silent parts
 
         # Synthetic RIR parameters
         # following paper: https://arxiv.org/abs/2212.11851

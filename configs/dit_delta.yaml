@@ -1,11 +1,11 @@
 experiment:
   name: CDiff_DiT_delta
-  output_dir: saved_models/CDiff_DiT_delta
+  output_dir: saved_models/CR-CDiff_DiT_delta
   seed: 42
 
 runtime:
   data_dir: data/out_combined_stereo # dataset path
-  gpu: 0
+  gpu: 2
   amp: true
   cudnn_benchmark: true
   allow_tf32: true

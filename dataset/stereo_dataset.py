@@ -204,8 +204,8 @@ def build_dataloaders(config, data_dir, seed: int = 42, num_workers: int = 4, pi
     split_dir = os.path.join(data_dir, "_splits_ri_stereo")  # any folder you like
     train_files, val_files = make_or_load_split(all_files, split_dir, config.val_split, seed)
 
-    train_ds = RIStereo(config, data_dir, train_files[:100])
-    val_ds   = RIStereo(config, data_dir, val_files[:10])
+    train_ds = RIStereo(config, data_dir, train_files)
+    val_ds   = RIStereo(config, data_dir, val_files)
 
     # reproducible worker seeding
     def seed_worker(worker_id):

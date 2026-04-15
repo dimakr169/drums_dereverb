@@ -68,10 +68,10 @@ We provide the following configs to reproduce our models from the paper:
 Example usage:
 
 ```bash
-python train_cold_ri.py \
-  --config configs/train_unet.yaml \
-  --gpu 0
+python train_cold_ri.py --config configs/unet_delta.yaml 
 ```
+
+In case resuming the training you can use the ```text --resume``` argument.
 
 Training outputs are written under the configured  directory, typically containing:
 
