@@ -1,4 +1,4 @@
-import os, time, math, random, argparse
+import os, time, math, random, argparse, gc
 import numpy as np
 import soundfile as sf
 import torch
@@ -467,10 +467,10 @@ class ColdRITrainer:
             "loss": loss.detach(),
             "noise": noise_loss.detach(),
             "audio": audio_loss.detach(),
-            "est_wav": est_wav.detach(),
-            "tar_wav": tar_wav.detach(),
-            "inp_wav": inp_wav.detach(),  
-            "clean_wav": clean_wav.detach(),
+            "est_wav": est_wav.detach().cpu(),
+            "tar_wav": tar_wav.detach().cpu(),
+            "inp_wav": inp_wav.detach().cpu(),
+            "clean_wav": clean_wav.detach().cpu(),
         }
 
     @torch.inference_mode()
@@ -495,7 +495,7 @@ class ColdRITrainer:
             xs.append(x.detach().to("cpu", non_blocking=False))
         return xs  # list of (B,4,F,T)
 
-    @torch.no_grad()
+    @torch.inference_mode()
     def generate_random_batch(self, epoch):
         out_root = os.path.join(self.output_dir, "samples", f"epoch_{epoch}")
         os.makedirs(out_root, exist_ok=True)
@@ -505,7 +505,7 @@ class ColdRITrainer:
         except StopIteration:
             return
 
-        reverb_ri, clean_ri = [b.to(self.device) for b in batch]
+        reverb_ri, clean_ri = [b.to(self.device, non_blocking=True) for b in batch]
         inp_ri = reverb_ri
 
         # swap-in EMA weights for generation
@@ -526,6 +526,11 @@ class ColdRITrainer:
             for t, pred in enumerate(preds):
                 pred_wav = self.get_signal_from_RI_stft(pred[i:i+1]).squeeze(0).permute(1,0).cpu().numpy()
                 sf.write(os.path.join(val_dir, f"diffused_{t}.wav"), pred_wav, sr)
+        # Cleanup
+        del batch, reverb_ri, clean_ri,  preds
+        gc.collect()
+        if torch.cuda.is_available():
+             torch.cuda.empty_cache()
 
     def train(self, start_epoch: int = 0, best_loss: float | None = None):
         train_size = len(self.train_loader)

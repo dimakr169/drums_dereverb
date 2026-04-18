@@ -71,7 +71,7 @@ Example usage:
 python train_cold_ri.py --config configs/unet_delta.yaml 
 ```
 
-In case resuming the training you can use the ```text --resume``` argument.
+In case resuming the training you can use the ```--resume``` argument.
 
 Training outputs are written under the configured  directory, typically containing:
 
