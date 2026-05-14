@@ -130,13 +130,9 @@ We kindly ask you to cite the paper in your publication when using any of our re
 @inproceedings{makris2026cold,
   title = {A Cold Diffusion Approach for Percussive Dereverberation},
   author = {Makris, Dimos and Barj{\'a}k, Andr{\'a}s and Kaliakatsos-Papakostas, Maximos},
-  booktitle = {Proceedings of the IEEE World Congress on Computational Intelligence (WCCI)},
+  journal={arXiv preprint arXiv:2605.10256},
   year = {2026},
-  note = {Accepted for the 2026 IEEE World Congress on Computational Intelligence, IJCNN Track},
-  eprint = {2605.10256},
-  archivePrefix = {arXiv},
-  primaryClass = {cs.SD},
-  doi = {10.48550/arXiv.2605.10256}
+  note = {Accepted for the 2026 IEEE World Congress on Computational Intelligence, IJCNN Track}
 }
 ```
 
