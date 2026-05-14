@@ -96,7 +96,7 @@ You can dereverb your own files using the `inference_cold_ri.py` script which:
 - reconstructs the final waveform after segment-wise dereverberation
 
 
-The script will use the model definition from the provided YAML config. We provide pre-trained checkpoints for UNet (`delta`, `direct`) and DiT (`delta`) backbones. You can download them from here (link will be added soon).
+The script will use the model definition from the provided YAML config. We provide pre-trained checkpoints for UNet (`delta`, `direct`) and DiT (`delta`) backbones. You can download them from [**here**](https://drive.google.com/file/d/1YqwjU9S39DgKMrRnfjcdPzMsmjEQAVYS/view?usp=sharing).
 
 #### Example Usage
 **UNet delta**
@@ -127,11 +127,16 @@ Coming soon
 We kindly ask you to cite the paper in your publication when using any of our research or code:
 
 ```bibtex
-@inproceedings{TBA,
-  title     = {A Cold Diffusion Approach for Percussive Dereverberation},
-  author    = {Makris, Dimos and Barjak, Andras and ́Kaliakatsos-Papakostas, Maximos},
+@inproceedings{makris2026cold,
+  title = {A Cold Diffusion Approach for Percussive Dereverberation},
+  author = {Makris, Dimos and Barj{\'a}k, Andr{\'a}s and Kaliakatsos-Papakostas, Maximos},
   booktitle = {Proceedings of the IEEE World Congress on Computational Intelligence (WCCI)},
-  year      = {2026}
+  year = {2026},
+  note = {Accepted for the 2026 IEEE World Congress on Computational Intelligence, IJCNN Track},
+  eprint = {2605.10256},
+  archivePrefix = {arXiv},
+  primaryClass = {cs.SD},
+  doi = {10.48550/arXiv.2605.10256}
 }
 ```
 

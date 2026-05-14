@@ -1,11 +1,11 @@
 experiment:
   name: CDiff_UNet_delta
-  output_dir: saved_models/CDiff_UNet_delta
+  output_dir: saved_models/CR-CDiff_UNet_delta
   seed: 42
 
 runtime:
   data_dir: data/out_combined_stereo #dataset path
-  gpu: 0
+  gpu: 1
   amp: true
   cudnn_benchmark: true
   allow_tf32: false
@@ -23,7 +23,7 @@ data:
   win_fn: hann
   center: true
   val_split: 0.2
-  batch_size: 8
+  batch_size: 4
 
 train:
   epochs: 200

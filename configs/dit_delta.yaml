@@ -5,7 +5,7 @@ experiment:
 
 runtime:
   data_dir: data/out_combined_stereo # dataset path
-  gpu: 2
+  gpu: 1
   amp: true
   cudnn_benchmark: true
   allow_tf32: true

@@ -252,6 +252,7 @@ class TransformerBlock(nn.Module):
     def _modulate(self, x, tproj):
         shift, scale, gate = tproj.chunk(3, dim=-1)   # (B,D) each
         x = x * (1 + scale.unsqueeze(1)) + shift.unsqueeze(1)
+        gate = torch.tanh(gate) #Soft-bound the gate
         return x, gate
     
 
